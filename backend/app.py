@@ -38,6 +38,7 @@ from indexer import IndexDatabase
 from indexer.harvester import Harvester
 from checker import LinkChecker
 from analyzer import Analyzer
+from douban import DoubanClient
 
 
 # ==========================================
@@ -80,9 +81,15 @@ class Searcher:
     def setup_harvester(self):
         """设置并启动收割器"""
         def harvest_search(keyword: str) -> list:
-            """收割用的搜索函数：raw 模式拿全量链接（含多链接消息）"""
+            """收割用的搜索函数：PanSou raw 全量 + 学霸盘书源，双源合并"""
             resp = self.pansou_client.search(keyword, result_type="all")
-            return self.extract_links(resp)
+            links = self.extract_links(resp)
+            try:
+                from search_engine.xuebapan import xuebapan_client
+                links = links + xuebapan_client.search(keyword)
+            except Exception as e:
+                logger.warning(f"学霸盘收割失败（忽略）: {e}")
+            return links
 
         self.harvester = Harvester(
             index_db=self.index_db,
@@ -103,21 +110,30 @@ checker = LinkChecker(
 
 
 def _check_links(items: list) -> list:
-    """调用 PanSou 的链接检测 API"""
+    """
+    调用 PanSou 的链接检测 API，返回原始状态供智能检测状态机判读。
+    state: ok(有效) / bad(失败) / uncertain(需验证) / unsupported(不支持检测)
+    """
     check_items = [
         {"disk_type": dt, "url": url, "password": pw}
         for url, dt, pw in items
     ]
     resp = pansou_client.check_links(check_items)
-    results = resp.get("results", [])
     return [
-        {"url": r["url"], "alive": r.get("state") == "ok"}
-        for r in results
+        {
+            "url": r.get("url", ""),
+            "state": r.get("state", "uncertain"),
+            "summary": r.get("summary", ""),
+        }
+        for r in (resp.get("results") or [])
     ]
 
 
 # 5. 分析器
 analyzer = Analyzer(index_db=index_db)
+
+# 6. 豆瓣客户端（榜单 + 资源封面）
+douban_client = DoubanClient()
 
 
 # ==========================================
@@ -128,7 +144,8 @@ def create_app():
 
     # 注册 API 路由
     from api import register_routes
-    register_routes(app, searcher, index_db, checker, analyzer, pansou_client)
+    register_routes(app, searcher, index_db, checker, analyzer,
+                    pansou_client, douban_client)
 
     # 前端静态文件服务
     frontend_dist = os.path.abspath(os.path.join(

@@ -1,5 +1,5 @@
 <script>
-const API = '/api'
+import { API, DISK_LABELS } from '../constants.js'
 
 export default {
   data() {
@@ -19,19 +19,16 @@ export default {
       }
       this.loading = false
     },
-    getDiskLabel(t) {
-      const map = { baidu: '百度', quark: '夸克', aliyun: '阿里', xunlei: '迅雷', '115': '115', tianyi: '天翼', uc: 'UC', pikpak: 'PikPak', '123': '123', magnet: '磁力', ed2k: '电驴' }
-      return map[t] || t
-    },
+    getDiskLabel(t) { return DISK_LABELS[t] || t },
   },
   mounted() { this.loadStats() },
 }
 </script>
 
 <template>
-  <div>
-    <div class="header">
-      <h1>📊 数据统计</h1>
+  <div class="page">
+    <div class="page-title">
+      <h2>📊 数据统计</h2>
       <p>索引库分析与系统运行状态</p>
     </div>
 

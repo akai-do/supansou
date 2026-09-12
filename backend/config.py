@@ -39,8 +39,26 @@ class Config:
     # ==========================================
     # 链接巡检配置
     # ==========================================
-    CHECKER_INTERVAL_HOURS = int(os.getenv("CHECKER_INTERVAL_HOURS", "24"))
+    CHECKER_INTERVAL_HOURS = int(os.getenv("CHECKER_INTERVAL_HOURS", "1"))
     CHECKER_BATCH_SIZE = int(os.getenv("CHECKER_BATCH_SIZE", "20"))
+    CHECKER_CYCLE_LIMIT = int(os.getenv("CHECKER_CYCLE_LIMIT", "300"))  # 每轮最多检测条数
+
+    # ==========================================
+    # 智能链接有效性检测（升级自旧版"即时链接体检"）
+    # 状态机: ok(有效) / suspect(疑似失效) / dead(确认失效) / ''(未检测)
+    # ==========================================
+    # 连续失败多少次才确认失效（防检测源抖动误杀；用户举报直接确认）
+    DEAD_CONFIRM_STREAK = int(os.getenv("DEAD_CONFIRM_STREAK", "2"))
+    # 各状态的新鲜度 TTL：新鲜期内复用结果不重复请求检测源
+    VALIDITY_OK_TTL_HOURS = float(os.getenv("VALIDITY_OK_TTL_HOURS", "72"))
+    VALIDITY_SUSPECT_TTL_MINUTES = float(os.getenv("VALIDITY_SUSPECT_TTL_MINUTES", "30"))
+    VALIDITY_DEAD_TTL_HOURS = float(os.getenv("VALIDITY_DEAD_TTL_HOURS", "12"))
+    # 智能检测总开关（关闭后仅剩周期巡检与用户举报）
+    SMART_CHECK_ENABLED = os.getenv("SMART_CHECK_ENABLED", "1") == "1"
+    # 搜索结果默认隐藏"确认失效"的资源卡（前端可展开查看）
+    HIDE_DEAD_LINKS = os.getenv("HIDE_DEAD_LINKS", "1") == "1"
+    # 每次新搜索后，后台对前 N 条新鲜度不足的链接静默补检
+    SMART_CHECK_BACKGROUND_LIMIT = int(os.getenv("SMART_CHECK_BACKGROUND_LIMIT", "12"))
 
     # ==========================================
     # 搜索配置
@@ -60,3 +78,18 @@ class Config:
     # 补充变体修饰词：对主关键词追加这些词扩搜（结果仍须经原词相关度过滤）
     SUPPLEMENT_MODIFIERS_CJK = os.getenv("SUPPLEMENT_MODIFIERS_CJK", "合集,资源,网盘").split(",")
     SUPPLEMENT_MODIFIERS_ASCII = os.getenv("SUPPLEMENT_MODIFIERS_ASCII", "教程,合集,电子书").split(",")
+
+    # ==========================================
+    # 书源（学霸盘）与拼写纠错
+    # ==========================================
+    ENABLE_XUEBAPAN = os.getenv("ENABLE_XUEBAPAN", "true").lower() == "true"
+    XUEBAPAN_TIMEOUT = int(os.getenv("XUEBAPAN_TIMEOUT", "8"))
+    XUEBAPAN_MAX_ITEMS = int(os.getenv("XUEBAPAN_MAX_ITEMS", "5"))
+
+    # ==========================================
+    # 豆瓣榜单与资源封面
+    # ==========================================
+    ENABLE_DOUBAN = os.getenv("ENABLE_DOUBAN", "1") == "1"
+    ENABLE_POSTERS = os.getenv("ENABLE_POSTERS", "1") == "1"
+    DOUBAN_TIMEOUT = float(os.getenv("DOUBAN_TIMEOUT", "6"))
+    DOUBAN_HOT_TTL_SECONDS = int(os.getenv("DOUBAN_HOT_TTL_SECONDS", "3600"))

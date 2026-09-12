@@ -14,9 +14,11 @@ import logging
 import re
 import time
 import threading
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, redirect, Response
 from datetime import datetime
 from config import Config
+from search_engine.xuebapan import xuebapan_client as _xuebapan
+from search_engine.spell import suggest_correction as _suggest_correction
 
 logger = logging.getLogger("api")
 
@@ -131,12 +133,18 @@ def _build_search_variants(keyword: str) -> list:
             variants.append(head)
 
     # 限制变体数量，原词永远第一位
+    # ★ 该 PanSou 部署对含空格查询一律返回 0：主词带空格时补一个去空格变体
+    if " " in kw:
+        nospace = kw.replace(" ", "")
+        if nospace and nospace not in variants:
+            variants.insert(1, nospace)
     return variants[:6]
 
 
 def _build_supplement_variants(keyword: str) -> list:
     """
-    补充变体：给主关键词追加通用修饰词扩搜（如 "python 教程"、"海贼王 合集"）。
+    补充变体：给主关键词追加通用修饰词扩搜（如 "python教程"、"海贼王合集"）。
+    注意用无空格拼接——该 PanSou 部署对含空格查询一律返回 0。
     扩的是召回不是意图——补充结果仍须通过原词相关度过滤（_matches_query），
     标题里不含原词的资源不会被采纳。
     """
@@ -152,7 +160,7 @@ def _build_supplement_variants(keyword: str) -> list:
         m = m.strip()
         if not m:
             continue
-        q = f"{kw} {m}"
+        q = f"{kw}{m}"          # 无空格拼接（源不支持空格查询）
         if q not in out:
             out.append(q)
     return out[:3]
@@ -178,6 +186,9 @@ def _matches_query(item, keyword, tokens):
     PanSou 对"电影"子词返回的海量与本查询无关的影视链接。
     注意：子词只匹配标题/来源——网盘分享码是随机字符串，
     若参与匹配，垃圾查询会因分享码恰好含子串而漏进无关结果。
+
+    长尾兜底由调用方控制：tokens 用 _tokenize_query(kw, extended=True)
+    生成的扩展表（含 CJK 信息词）即宽松模式，仅在严格过滤颗粒无收时使用。
     """
     title_source = " ".join([
         str(item.get("title", "") or ""),
@@ -189,29 +200,68 @@ def _matches_query(item, keyword, tokens):
     # 完整原词命中（标题/来源/URL）即合格
     if keyword and keyword.lower() in full_blob:
         return True
-    # 否则需命中任一有意义的子词（仅标题/来源）
+    # 否则需命中任一有意义的信息词（仅标题/来源）
     return any(t in title_source for t in tokens)
 
 
-def _tokenize_query(keyword: str) -> list:
-    """提取用于相关性过滤的有意义子词（与 _split_terms 同步）"""
+def _tokenize_query(keyword: str, extended: bool = False) -> list:
+    """
+    提取用于相关性过滤的信息词。
+
+    strict（默认）：仅 ASCII 词——网盘分享码/英文词的可靠信号。
+    extended（长尾兜底）：追加 CJK 连续段（>=2 字）——长书名/教材名的
+    拆词命中靠它才能通过过滤；只应在严格过滤 0 结果后使用，
+    否则垃圾查询里的真实中文词（如"不存在"）会漏进模糊结果。
+    """
     tokens = []
     ascii_buf = []
+    cjk_buf = []
 
-    def flush():
+    def flush_ascii():
         if ascii_buf:
             w = "".join(ascii_buf).lower()
-            if not re.sub(r"[\d\s]", "", w) == "" and len(w) >= 2 and w not in tokens:
+            if len(w) >= 2 and not re.fullmatch(r"[\d\s]+", w) and w not in tokens:
                 tokens.append(w)
             ascii_buf.clear()
 
+    def flush_cjk():
+        if cjk_buf:
+            seg = "".join(cjk_buf)
+            if len(seg) >= 2 and seg not in tokens:
+                tokens.append(seg)
+            cjk_buf.clear()
+
     for c in list(keyword):
         if ord(c) < 128:
+            flush_cjk()
             ascii_buf.append(c)
-            continue
-        flush()
-    flush()
+        else:
+            flush_ascii()
+            cjk_buf.append(c)
+    flush_ascii()
+    if extended:
+        flush_cjk()
     return tokens
+
+
+def _iter_collected_links(collected):
+    """展平 wave collected 里所有 ok 项的链接"""
+    for item in collected:
+        if item[0] == "ok":
+            for ln in (item[2] or []):
+                yield ln
+
+
+def _token_hits(item, keyword, tokens):
+    """扩展信息词在标题/来源中的命中数；完整原词命中直接视为全命中"""
+    title_source = " ".join([
+        str(item.get("title", "") or ""),
+        str(item.get("source", "") or ""),
+    ]).lower()
+    if keyword and keyword.lower() in (title_source + " " +
+                                       str(item.get("url", "") or "").lower()):
+        return len(tokens) + 1
+    return sum(1 for t in tokens if t in title_source)
 
 
 def _shorten_title(title: str, maxlen: int = 46) -> str:
@@ -230,7 +280,7 @@ def _shorten_title(title: str, maxlen: int = 46) -> str:
     return t
 
 
-def _dedup_and_rank(archive_items, realtime_items, keyword):
+def _dedup_and_rank(archive_items, realtime_items, keyword, click_map=None):
     """
     融合历史索引与实时搜索结果：跨源去重 + 综合排序。
 
@@ -239,6 +289,7 @@ def _dedup_and_rank(archive_items, realtime_items, keyword):
       2. 历史与实时撞车时：保留实时结果（数据更新、带完整来源），
          但若历史结果带密码而实时不带，则补全密码
       3. 综合评分 = 相关度(标题/来源命中) + 存活(实时优先) + 网盘偏好
+                      + 点击热度(本关键词下被点过的资源加权置顶)
     返回 (完整融合排序列表, 历史计数, 实时计数)。
     截断交给上层的 _group_resources（按资源分组后再限量）。
     """
@@ -265,9 +316,17 @@ def _dedup_and_rank(archive_items, realtime_items, keyword):
         ]).lower()
         if keyword and keyword.lower() in blob:
             s += 3.0
-        # 存活（实时结果视为最新，默认存活）
-        alive = item.get("alive", 1) if item.get("from_archive") else 1
-        s += 2.0 if alive else -5.0
+        # ★ 有效性（智能检测状态机）：确认失效重罚、疑似降权、已验证轻奖。
+        #   实时结果默认视为存活（validity='' 不奖不罚，由实时体检补充状态）。
+        validity = item.get("validity") or (
+            "dead" if item.get("alive", 1) == 0 else ""
+        )
+        if validity == "dead":
+            s -= 8.0
+        elif validity == "suspect":
+            s -= 2.5
+        elif validity == "ok":
+            s += 0.5
         # 有密码的信息更完整，加分
         if item.get("password"):
             s += 1.0
@@ -281,6 +340,14 @@ def _dedup_and_rank(archive_items, realtime_items, keyword):
         ts = str(item.get("datetime") or item.get("last_seen") or "")
         if ts:
             s += 0.3  # 有时间信息的略靠前
+        # ★ 点击热度反馈：用户点过的资源 = 真实有效性投票。
+        #   本关键词下点过的权重高，全局点过的略作加成；上限 2.5，
+        #   保证不会盖过相关度差距过大的结果。
+        #   已确认失效的链接永不加成——死链不配靠点击置顶。
+        if validity != "dead":
+            c = click_map.get(item.get("url") or "")
+            if c:
+                s += min(2.5, c.get("kw", 0) * 0.8 + c.get("total", 0) * 0.2)
         return s
 
     merged = {}
@@ -306,6 +373,11 @@ def _dedup_and_rank(archive_items, realtime_items, keyword):
             new_item = it
             if not new_item.get("password") and old_pw:
                 new_item["password"] = old_pw
+            # ★ 实时覆盖不能丢掉已确认的智能检测结果：
+            #   索引库早已判定 失效/疑似 的链接，不能因为实时又搜到就洗白
+            for k in ("validity", "state_summary", "checked_at", "fail_cnt"):
+                if not new_item.get(k) and existing.get(k):
+                    new_item[k] = existing.get(k)
             merged[key] = new_item
 
     for it in archive_items:
@@ -361,9 +433,17 @@ def _normalize_title_key(title: str) -> str:
 
 
 def _rep_score(it: dict) -> float:
-    """组内选主卡：存活 > 带密码 > 实时 > 标题更完整 > 网盘偏好"""
+    """组内选主卡：有效性 > 带密码 > 实时 > 标题更完整 > 网盘偏好"""
     s = 0.0
-    s += 2.0 if it.get("alive", 1) else -5.0
+    v = it.get("validity") or ""
+    if v == "ok":
+        s += 2.5
+    elif v == "dead" or it.get("alive", 1) == 0:
+        s -= 5.0
+    elif v == "suspect":
+        s -= 1.5
+    else:
+        s += 2.0  # 未检测的实时结果默认存活
     if it.get("password"):
         s += 1.0
     if not it.get("from_archive"):
@@ -374,7 +454,8 @@ def _rep_score(it: dict) -> float:
 
 
 _VARIANT_FIELDS = ("url", "password", "disk_type", "source",
-                   "datetime", "last_seen", "alive", "from_archive", "title")
+                   "datetime", "last_seen", "alive", "from_archive", "title",
+                   "validity", "state_summary", "checked_at")
 
 
 def _group_resources(ranked: list, limit: int = 60) -> list:
@@ -417,7 +498,173 @@ def _group_resources(ranked: list, limit: int = 60) -> list:
     return cards if limit is None else cards[:limit]
 
 
-def register_routes(app, searcher, index_db, checker, analyzer, pansou_client):
+def _card_validity(card: dict) -> str:
+    """
+    资源卡整体有效性（含同资源变体链接）：
+    任一链接已验证有效 → ok；全部确认失效 → dead；
+    有疑似且无已验证 → suspect；其余（未检测/不支持检测）→ ''。
+    """
+    members = [card] + list(card.get("variants") or [])
+    vs = [str(m.get("validity") or "") for m in members]
+    if any(v == "ok" for v in vs):
+        return "ok"
+    if all(v == "dead" for v in vs):
+        return "dead"
+    if any(v == "suspect" for v in vs):
+        return "suspect"
+    return ""
+
+
+# ==========================================
+# 点击后智能体检
+# 用户点开链接 = 一次"我要用它"的动作。若分享已失效，
+# 必须尽快打回：点击跳转不受影响，后台线程立即走智能检测
+# 状态机（首次失败→疑似，连续确认→失效），检出失效 →
+# 打标 + 撤销点击热度 + 失效该关键词的结果缓存。
+# ==========================================
+_checking_urls = set()
+_checking_lock = threading.Lock()
+
+
+def _invalidate_kw_cache(kw: str):
+    """失效某关键词的全部搜索结果缓存（排序/隐藏状态变化时调用）"""
+    kw = (kw or "").strip().lower()
+    if not kw:
+        return
+    prefix = kw + "|"
+    with _search_cache_lock:
+        for k in [k for k in _search_cache if k.startswith(prefix)]:
+            _search_cache.pop(k, None)
+
+
+# ==========================================
+# 资源封面：标题 → 豆瓣海报匹配
+# ==========================================
+
+def _poster_query(title: str) -> str:
+    """
+    资源标题 → 豆瓣建议搜索的查询串。
+    资源标题常带【合集】【全36集】【4K】等包装段落堆砌，截到首段并去掉
+    画质/集数噪声，剩下的"剧名+年份"才是豆瓣能匹配的实体词。
+    """
+    t = (title or "").strip()
+    if not t:
+        return ""
+    # 以【】开头的标题取第一个括号内的内容；否则截到第一个包装段落/分隔符
+    m = re.match(r"^[【\[]\s*(.+?)\s*[】\]]", t)
+    if m:
+        t = m.group(1).strip()
+    else:
+        t = re.split(r"[【\[（(«]|·| - | \| |💾|📁|💬", t)[0].strip() or t
+    # 去画质/集数/季数噪声
+    t = re.sub(
+        r"(全\d+集|\d+集全|更新至\d+集|第?\d+\s*[季期]|4k|8k|1080p|720p|"
+        r"hdr|蓝光|高清|超清|hq|中字|国语|粤语)",
+        " ", t, flags=re.IGNORECASE,
+    )
+    t = re.sub(r"\s+", " ", t).strip(" ·-:：,，")
+    return t[:24]
+
+
+def _poster_variants(query: str) -> list:
+    """
+    豆瓣匹配降级变体链：完整清洗词 → 去通用包装后缀（合集/全集/教程...）→ 首词。
+    逐个尝试直到命中，最大化封面命中率且不引入乱匹配。
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    variants = [q]
+    stripped = re.sub(
+        r"(合集|全集|资源|完整版|正版|网盘|片源|电影|电视剧|综艺|动漫|"
+        r"纪录片|教程|课程|附赠|合集版)$", "", q,
+    ).strip(" ·-:：,，")
+    if stripped and stripped not in variants:
+        variants.append(stripped)
+    # 去年份/备注括号：庆余年（2019） → 庆余年
+    noparen = re.sub(r"[（(][^）)]*[）)]", "", stripped).strip(" ·-:：,，")
+    if noparen and noparen not in variants:
+        variants.append(noparen)
+    if " " in noparen:
+        first = noparen.split(" ")[0].strip()
+        if len(first) >= 2 and first not in variants:
+            variants.append(first)
+    return variants
+
+
+def _async_check_link(checker, index_db, url, disk_type, password, kw=""):
+    """后台智能体检单条链接；确认失效则打标并撤销热度。同 URL 去重防重复体检。"""
+    def _work():
+        try:
+            res = checker.check_items([
+                {"url": url, "disk_type": disk_type or "",
+                 "password": password or ""}
+            ])
+            info = res.get(url) or {}
+            validity = info.get("validity") or ""
+            if validity == "dead":
+                heat = index_db.clear_click_heat(url)
+                _invalidate_kw_cache(kw)
+                logger.info(f"[智能检测] 点击体检确认失效: {url[:60]} "
+                            f"(撤销热度 {heat} 条)")
+            else:
+                state = info.get("state", "unknown")
+                logger.info(f"[智能检测] 点击体检: {url[:60]} → "
+                            f"{validity or state}")
+        except Exception as e:
+            logger.error(f"[智能检测] 点击体检 {url[:60]} 失败: {e}")
+        finally:
+            with _checking_lock:
+                _checking_urls.discard(url)
+
+    with _checking_lock:
+        if url in _checking_urls:
+            return
+        _checking_urls.add(url)
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def _background_smart_check(checker, cards: list, cache_key: str):
+    """
+    搜索后静默补检：对结果池前排卡片的主链接里"未检测/已过期"的，
+    后台送智能检测并刷新状态机；有新结论才失效该关键词缓存，
+    下次搜索/翻页即可看到最新的降权与隐藏效果。
+    """
+    items = []
+    for c in cards:
+        u = str(c.get("url") or "")
+        if not u or not re.match(r"^https?://", u, re.IGNORECASE):
+            continue
+        items.append({
+            "url": u,
+            "disk_type": str(c.get("disk_type") or "").strip(),
+            "password": str(c.get("password") or "").strip(),
+        })
+        if len(items) >= Config.SMART_CHECK_BACKGROUND_LIMIT:
+            break
+    if not items:
+        return
+
+    def _work():
+        try:
+            res = checker.check_items(items)
+            updated = any(
+                (not v.get("fresh"))
+                and v.get("state") not in ("unknown", "unsupported", "cached")
+                for v in res.values()
+            )
+            if updated:
+                _invalidate_kw_cache(cache_key.split("|")[0])
+                logger.info(f"[智能检测] 搜索后补检 {len(items)} 条，"
+                            f"有新结论已刷新缓存")
+        except Exception as e:
+            logger.error(f"[智能检测] 搜索后补检失败: {e}")
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def register_routes(app, searcher, index_db, checker, analyzer,
+                    pansou_client, douban_client=None):
     """注册所有路由（由 app.py 调用注入依赖）"""
 
     @api_bp.route("/search", methods=["POST"])
@@ -458,59 +705,51 @@ def register_routes(app, searcher, index_db, checker, analyzer, pansou_client):
         except (TypeError, ValueError):
             page_size = 20
 
-        # ====== 结果缓存：TTL 内同关键词翻页零成本 ======
-        cache_key = "|".join([
-            keyword.lower(),
-            "a" if only_archive else "r",
-            ",".join(sorted(disk_types)) if disk_types else "-",
-            str(data.get("src", "all")),
-        ])
-        payload = None
-        if not force_refresh:
-            with _search_cache_lock:
-                ent = _search_cache.get(cache_key)
-                if ent and time.time() - ent[0] < Config.CACHE_TTL_SECONDS:
-                    payload = ent[1]
-        from_cache = payload is not None
+        def _do_search(kw):
+            """执行一次完整搜索（缓存 get/put、历史记录按词内部处理）。返回 (payload, from_cache)。"""
+            cache_key = "|".join([
+                kw.lower(),
+                "a" if only_archive else "r",
+                ",".join(sorted(disk_types)) if disk_types else "-",
+                str(data.get("src", "all")),
+            ])
+            payload = None
+            if not force_refresh:
+                with _search_cache_lock:
+                    ent = _search_cache.get(cache_key)
+                    if ent and time.time() - ent[0] < Config.CACHE_TTL_SECONDS:
+                        payload = ent[1]
+            if payload is not None:
+                return payload, True
 
-        if from_cache:
-            cards = payload["cards"]
-            hist_n = payload["hist"]
-            real_n = payload["real"]
-            raw_count = payload["raw_count"]
-            archive_raw = payload["archive_raw"]
-            realtime_raw = payload["realtime_raw"]
-            pansou_error = payload["error"]
-        else:
             # ====== 第 1 路：从本地索引库搜索（历史结果）======
             archive_results = []
             try:
                 archive_results = index_db.search(
-                    keyword, disk_types=disk_types, limit=50
+                    kw, disk_types=disk_types, limit=50
                 )
             except Exception as e:
                 logger.error(f"索引搜索失败: {e}")
 
-            # ====== 第 2 路：从 PanSou 实时搜索（最新结果）======
-            # 多变体并发：PanSou 对连续中文词组（如"蜘蛛侠电影"）匹配极弱，
-            # 仅返回个位数。这里自动拆词生成多个搜索变体并发请求，合并去重，
-            # 大幅提升实时召回率（这是"搜得新"的关键手段）。
+            # ====== 第 2 路：实时搜索（PanSou 多变体 + 学霸盘书源）======
+            # 主变体+补充变体+书源一起并发扇出；补充结果必须含原词才能入选，
+            # 只扩召回、不污染主查询的相关性。
             realtime_results = []
             pansou_error = None
             if not only_archive:
                 try:
-                    variants = _build_search_variants(keyword)
-                    supplements = _build_supplement_variants(keyword)
-                    # 用于相关度过滤的有意义子词（对"变体搜索"带回的偏差结果做二次筛选）
-                    query_tokens = _tokenize_query(keyword)
+                    variants = _build_search_variants(kw)
+                    supplements = _build_supplement_variants(kw)
+                    # 严格相关度过滤的信息词（仅 ASCII；长尾兜底时换扩展表）
+                    query_tokens = _tokenize_query(kw)
                     import threading as _th
 
-                    def _run_wave(query_list):
-                        """并发执行一批查询，返回原始 collected 列表"""
+                    def _run_wave(query_list, with_xuebapan=False):
+                        """并发执行一批查询（可附带学霸盘书源），返回 collected"""
                         collected = []
                         lock = _th.Lock()
 
-                        def _one(variant):
+                        def _one_pansou(variant):
                             try:
                                 resp = pansou_client.search(
                                     variant,
@@ -530,15 +769,28 @@ def register_routes(app, searcher, index_db, checker, analyzer, pansou_client):
                                 with lock:
                                     collected.append(("err", str(e)))
 
-                        threads = [_th.Thread(target=_one, args=(v,), daemon=True)
+                        def _one_xuebapan():
+                            try:
+                                links = _xuebapan.search(kw) if _xuebapan.enabled else []
+                                with lock:
+                                    if links:
+                                        collected.append(("ok", "xuebapan", links))
+                            except Exception as e:
+                                with lock:
+                                    collected.append(("err", f"xuebapan: {e}"))
+
+                        threads = [_th.Thread(target=_one_pansou, args=(v,), daemon=True)
                                    for v in query_list]
+                        if with_xuebapan:
+                            threads.append(_th.Thread(target=_one_xuebapan, daemon=True))
                         for t in threads:
                             t.start()
                         for t in threads:
-                            t.join(timeout=Config.PANSOU_TIMEOUT + 5)
+                            t.join(timeout=max(Config.PANSOU_TIMEOUT + 5,
+                                               Config.XUEBAPAN_TIMEOUT + 5))
                         return collected
 
-                    def _absorb(collected):
+                    def _absorb(collected, tokens):
                         """合并一批结果进 merged_realtime（相关度过滤 + 智能去重）"""
                         nonlocal pansou_error
                         for item in collected:
@@ -551,28 +803,49 @@ def register_routes(app, searcher, index_db, checker, analyzer, pansou_client):
                                 u = ln.get("url", "")
                                 if not u:
                                     continue
+                                # 网盘类型过滤（学霸盘书源不走 PanSou 的
+                                # cloud_types 参数，这里统一补一道）
+                                if disk_types and \
+                                        str(ln.get("disk_type") or "").lower() not in disk_types:
+                                    continue
                                 # ★ 相关性过滤：剔除"子词/修饰词顺带命中"但与原查询无关的结果，
                                 #   这是把"一个都没有"提升到"一排都是可用结果"的关键。
-                                if not _matches_query(ln, keyword, query_tokens):
+                                if not _matches_query(ln, kw, tokens):
                                     continue
                                 old = merged_realtime.get(u)
                                 if old is None or _link_quality(ln) > _link_quality(old):
                                     merged_realtime[u] = ln
 
                     merged_realtime = {}
-                    # 主变体 + 补充变体一起扇出：补充结果必须含原词才能入选，
-                    # 因此只扩召回、不污染主查询的相关性。
-                    _absorb(_run_wave(variants + supplements))
+                    combined = _run_wave(variants + supplements, with_xuebapan=True)
+                    _absorb(combined, query_tokens)
 
-                    # ★ 低召回重查：吃满 PanSou 异步爬取带来的服务端缓存增长。
-                    # 仅当"有少量相关结果"时才重查（冷词正在后台爬）；
-                    # 完全无相关结果说明是垃圾/极冷查询，重查同样查询词无意义。
+                    # ★ 低召回重查：吃满 PanSou 异步爬取带来的服务端缓存增长
                     retries = 0
                     while (0 < len(merged_realtime) < Config.RECALL_REQUERY_THRESHOLD
                            and retries < Config.RECALL_REQUERY_MAX):
                         time.sleep(Config.RECALL_REQUERY_WAIT)
-                        _absorb(_run_wave(variants))
+                        _absorb(_run_wave(variants), query_tokens)
                         retries += 1
+
+                    # ★ 长尾兜底：严格过滤颗粒无收时，用扩展信息词（含 CJK 段）
+                    #   重滤同一批结果——长书名/教材名常被"全名必须出现"误杀。
+                    #   收紧：扩展词 >=2 个时要求至少命中 2 个（单词命中太容易
+                    #   被无关结果顺带满足，会把 0 结果变成满屏噪声）。
+                    if not merged_realtime and len(kw) > 6:
+                        ext_tokens = _tokenize_query(kw, extended=True)
+                        min_hits = 2 if len(ext_tokens) >= 2 else 1
+                        relaxed = [ln for ln in _iter_collected_links(combined)
+                                   if _token_hits(ln, kw, ext_tokens) >= min_hits]
+                        for ln in relaxed:
+                            u = ln.get("url", "")
+                            if not u:
+                                continue
+                            old = merged_realtime.get(u)
+                            if old is None or _link_quality(ln) > _link_quality(old):
+                                merged_realtime[u] = ln
+                        if merged_realtime:
+                            logger.info(f"[长尾] '{kw[:40]}' 宽松兜底命中 {len(merged_realtime)} 条")
 
                     realtime_results = list(merged_realtime.values())
 
@@ -581,50 +854,119 @@ def register_routes(app, searcher, index_db, checker, analyzer, pansou_client):
                     try:
                         stored = index_db.store_links(realtime_results)
                         if stored > 0:
-                            logger.info(f"[Search] '{keyword}' → 索引新增 {stored} 条")
+                            logger.info(f"[Search] '{kw}' → 索引新增 {stored} 条")
                     except Exception as e:
                         logger.error(f"写入索引失败: {e}")
+
+                    # ★ 用索引库的智能检测状态给实时结果补上有效性：
+                    #   早被巡检/举报确认失效的链接，不能因为"实时"就当存活展示
+                    try:
+                        _vmap = index_db.get_validity_map(
+                            [ln.get("url") for ln in realtime_results]
+                        )
+                        for ln in realtime_results:
+                            vi = _vmap.get(ln.get("url"))
+                            if vi:
+                                ln["validity"] = vi["validity"]
+                                ln["state_summary"] = vi["state_summary"]
+                                ln["checked_at"] = vi["checked_at"]
+                    except Exception as e:
+                        logger.error(f"补全有效性状态失败: {e}")
 
                 except Exception as e:
                     pansou_error = str(e)
                     logger.error(f"PanSou 搜索失败: {e}")
 
             # ====== 融合结果 ======
-            # 历史结果标记来源
             for item in archive_results:
                 item["from_archive"] = True
-
-            # 实时结果标记
             for item in realtime_results:
                 item["from_archive"] = False
 
-            # ★★★ 跨源去重 + 综合排序 + 同资源聚合 ★★★
-            # 融合成一条结果流后，按归一化标题把同一资源的多个
-            # 网盘/发布帖合并为一张资源卡（variants 可展开）。
+            # ★★★ 跨源去重 + 综合排序 + 同资源聚合 + 点击热度置顶 ★★★
+            try:
+                click_map = index_db.get_click_stats(kw)
+            except Exception as e:
+                logger.error(f"读取点击统计失败: {e}")
+                click_map = {}
             ranked_pool, hist_n, real_n = _dedup_and_rank(
-                archive_results, realtime_results, keyword
+                archive_results, realtime_results, kw, click_map=click_map
             )
             cards = _group_resources(ranked_pool, limit=None)
-            raw_count = len(ranked_pool)
-            archive_raw = len(archive_results)
-            realtime_raw = len(realtime_results)
+
+            # ★ 智能隐藏：全部链接确认失效的资源卡移出主列表
+            #   （hidden_dead 随响应返回，前端可展开"已隐藏的失效资源"）
+            hidden_dead_cards = []
+            if Config.HIDE_DEAD_LINKS:
+                visible_cards = []
+                for c in cards:
+                    if _card_validity(c) == "dead":
+                        hidden_dead_cards.append(c)
+                    else:
+                        visible_cards.append(c)
+                if hidden_dead_cards:
+                    logger.info(f"[智能检测] '{kw}' 隐藏 {len(hidden_dead_cards)} "
+                                f"张失效资源卡")
+                cards = visible_cards
 
             # ★ 记录搜索历史（仅真实搜索计数，缓存翻页不计）
             try:
-                index_db.record_search(keyword)
+                index_db.record_search(kw)
             except Exception as e:
                 logger.error(f"记录搜索历史失败: {e}")
 
             payload = {
                 "cards": cards,
-                "raw_count": raw_count,
+                "raw_count": len(ranked_pool),
                 "hist": hist_n,
                 "real": real_n,
-                "archive_raw": archive_raw,
-                "realtime_raw": realtime_raw,
+                "archive_raw": len(archive_results),
+                "realtime_raw": len(realtime_results),
+                "hidden_dead": hidden_dead_cards[:50],
+                "hidden_dead_count": len(hidden_dead_cards),
                 "error": pansou_error,
             }
             _cache_put(cache_key, payload)
+
+            # ★ 搜索后静默补检：前排卡片里未检测/过期的链接后台送检，
+            #   有新结论会失效本关键词缓存（下次搜索即见降权/隐藏生效）
+            if Config.SMART_CHECK_ENABLED:
+                try:
+                    _background_smart_check(checker, cards, cache_key)
+                except Exception as e:
+                    logger.error(f"后台补检调度失败: {e}")
+            return payload, False
+
+        payload, from_cache = _do_search(keyword)
+
+        # ★ 拼写纠错：0 结果时自动纠正重搜（Chrome 式"您是不是要找"）
+        #   注：不看 pansou_error——单个变体失败不应阻止纠错
+        correction = None
+        if not payload["cards"] and not only_archive:
+            sug = _suggest_correction(index_db, keyword)
+            if sug and sug.lower() != keyword.lower():
+                p2, fc2 = _do_search(sug)
+                if p2["cards"]:
+                    payload, from_cache = p2, fc2
+                    correction = {"from": keyword, "to": sug}
+                    logger.info(f"[纠错] '{keyword}' → '{sug}' ({len(p2['cards'])} 张资源卡)")
+
+        # ★ 零结果守望队列：真没有的词入队，harvester 每轮全源重试
+        if not payload["cards"]:
+            try:
+                index_db.record_zero_result(keyword)
+                logger.info(f"[守望] '{keyword}' 零结果，已加入守望队列")
+            except Exception as e:
+                logger.error(f"记录守望队列失败: {e}")
+
+        cards = payload["cards"]
+        raw_count = payload["raw_count"]
+        hist_n = payload["hist"]
+        real_n = payload["real"]
+        archive_raw = payload["archive_raw"]
+        realtime_raw = payload["realtime_raw"]
+        hidden_dead_cards = payload.get("hidden_dead") or []
+        pansou_error = payload["error"]
 
         # ====== 分页切片（缓存命中与新搜索共用）======
         total_cards = len(cards)
@@ -636,6 +978,8 @@ def register_routes(app, searcher, index_db, checker, analyzer, pansou_client):
 
         return jsonify({
             "keyword": keyword,
+            "effective_keyword": (correction or {}).get("to", keyword),
+            "correction": correction,
             "total": total_cards,
             "raw_count": raw_count,
             "page": page,
@@ -647,6 +991,9 @@ def register_routes(app, searcher, index_db, checker, analyzer, pansou_client):
             "archive_count_raw": archive_raw,
             "realtime_count_raw": realtime_raw,
             "results": page_cards,
+            "hidden_dead": hidden_dead_cards[:50],
+            "hidden_dead_count": len(hidden_dead_cards),
+            "hide_dead": Config.HIDE_DEAD_LINKS,
             "pansou_error": pansou_error,
             "timestamp": datetime.now().isoformat(),
         })
@@ -669,6 +1016,69 @@ def register_routes(app, searcher, index_db, checker, analyzer, pansou_client):
             return jsonify({"deleted": deleted})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+
+    @api_bp.route("/click", methods=["GET"])
+    def click():
+        """
+        结果点击中转：记录点击 → 后台即时体检 → 失效缓存 → 302 到真实网盘。
+
+        参数:
+            u:  目标链接（必须 http/https；磁力/ed2k 不支持中转，前端走直链）
+            kw: 触发搜索的关键词（用于"本词下点过的置顶"加权）
+            dt: 网盘类型（可选，供即时体检选对检测器）
+            pw: 提取码（可选，同上）
+        """
+        target = request.args.get("u", "").strip()
+        kw = request.args.get("kw", "").strip()
+        if not target or not re.match(r"^https?://", target, re.IGNORECASE):
+            return jsonify({"error": "仅支持 http(s) 链接中转"}), 400
+
+        try:
+            index_db.record_click(target, kw)
+        except Exception as e:
+            logger.error(f"记录点击失败: {e}")
+
+        # ★ 点击后智能体检：走有效性状态机（首次失败→疑似降权，
+        #   连续确认→失效），确认失效撤销热度并刷新该词的结果缓存。
+        _async_check_link(
+            checker, index_db, target,
+            request.args.get("dt", "").strip(),
+            request.args.get("pw", "").strip(),
+            kw=kw,
+        )
+
+        # 失效该关键词的缓存，让"点过的置顶"下次搜索立刻生效
+        if kw:
+            prefix = kw.lower() + "|"
+            with _search_cache_lock:
+                for k in [k for k in _search_cache if k.startswith(prefix)]:
+                    _search_cache.pop(k, None)
+
+        return redirect(target, code=302)
+
+    @api_bp.route("/report/dead", methods=["POST"])
+    def report_dead():
+        """
+        失效举报：用户点开发现"分享已失效"时一键上报。
+        立即打失效标记 + 撤销该链接全部点击热度 + 失效关键词缓存。
+        （个人部署工具，信任本地用户；举报记录进日志）
+        """
+        data = request.get_json(force=True, silent=True) or {}
+        url = (data.get("u") or "").strip()
+        kw = (data.get("kw") or "").strip()
+        if not url or not re.match(r"^https?://", url, re.IGNORECASE):
+            return jsonify({"error": "链接无效"}), 400
+
+        try:
+            index_db.mark_reported_dead(url)
+            heat = index_db.clear_click_heat(url)
+        except Exception as e:
+            return jsonify({"error": f"标记失败: {e}"}), 500
+
+        _invalidate_kw_cache(kw)
+
+        logger.info(f"[举报] 失效: {url[:60]} kw={kw!r} (撤销热度 {heat} 条)")
+        return jsonify({"ok": True, "heat_cleared": heat})
 
     @api_bp.route("/archive", methods=["GET"])
     def browse_archive():
@@ -756,6 +1166,149 @@ def register_routes(app, searcher, index_db, checker, analyzer, pansou_client):
             "index_db_size": index_db.get_stats().get("total", 0),
             "timestamp": datetime.now().isoformat(),
         })
+
+    @api_bp.route("/check/batch", methods=["POST"])
+    def check_batch():
+        """
+        智能批量有效性检测：前端渲染当前页后，把可见链接送来体检，
+        就地刷新"有效/疑似失效/已失效"徽章与降权排序。
+
+        请求体: {"items": [{"url", "disk_type", "password"}], "force": false}
+        返回:   {"results": {url: {"validity", "state", "summary",
+                                   "checked_at", "fresh"}}}
+          validity: ok=有效 / suspect=疑似失效 / dead=确认失效 / ''=未检测
+          fresh=true 表示复用保鲜期内的既有结果，未真正请求检测源。
+        """
+        data = request.get_json(force=True, silent=True) or {}
+        raw_items = data.get("items") or []
+        items = []
+        seen = set()
+        for it in raw_items[:60]:
+            if not isinstance(it, dict):
+                continue
+            url = str(it.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            items.append({
+                "url": url,
+                "disk_type": str(it.get("disk_type") or "").strip(),
+                "password": str(it.get("password") or "").strip(),
+            })
+        if not items:
+            return jsonify({"results": {}})
+        try:
+            results = checker.check_items(items, force=bool(data.get("force")))
+            return jsonify({"results": results})
+        except Exception as e:
+            logger.error(f"批量检测失败: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    # ==========================================
+    # 热搜词 / 豆瓣榜单 / 封面海报
+    # ==========================================
+
+    @api_bp.route("/hot", methods=["GET"])
+    def hot_keywords():
+        """热搜词（索引热词 top20）+ 索引总量，供搜索页热搜行"""
+        try:
+            st = index_db.get_stats()
+            return jsonify({"hot": st.get("hot_keywords") or [],
+                            "total": st.get("total", 0)})
+        except Exception as e:
+            return jsonify({"hot": [], "total": 0, "error": str(e)})
+
+    @api_bp.route("/douban/hot", methods=["GET"])
+    def douban_hot():
+        """
+        豆瓣榜单代理（结果服务端缓存 1h）
+
+        参数: type=movie|tv, tag=热门|综艺|国产剧|..., page_start=0(翻页)
+        """
+        type_ = request.args.get("type", "movie")
+        tag = request.args.get("tag", "热门")
+        try:
+            page_start = max(0, int(request.args.get("page_start", "0")))
+        except (TypeError, ValueError):
+            page_start = 0
+        items = []
+        if douban_client:
+            items = douban_client.hot(type_, tag,
+                                      page_limit=25, page_start=page_start)
+        return jsonify({
+            "items": items,
+            "enabled": bool(douban_client and douban_client.enabled),
+            "error": douban_client.last_error if douban_client else "未启用",
+        })
+
+    @api_bp.route("/poster/batch", methods=["POST"])
+    def poster_batch():
+        """
+        资源标题批量匹配豆瓣海报封面
+
+        请求: {"titles": ["...", ...]}（≤12 条）
+        返回: {"posters": {"标题": "doubanio 图 URL 或 null"}}
+        匹配结果永久缓存（含"无匹配"），命中缓存零豆瓣请求。
+        """
+        if not Config.ENABLE_POSTERS or not douban_client or not douban_client.enabled:
+            return jsonify({"posters": {}})
+        data = request.get_json(force=True, silent=True) or {}
+        titles = []
+        seen = set()
+        for t in (data.get("titles") or [])[:12]:
+            t = str(t or "").strip()
+            if t and t not in seen:
+                seen.add(t)
+                titles.append(t)
+        if not titles:
+            return jsonify({"posters": {}})
+
+        out = {}
+        keys = {t: _poster_query(t) for t in titles}
+        cached = index_db.get_posters([k for k in keys.values() if k])
+        missing = []
+        for t in titles:
+            k = keys[t]
+            if not k:
+                out[t] = None
+            elif k in cached:
+                out[t] = cached[k] or None
+            else:
+                missing.append(t)
+        for t in missing:
+            img = None
+            for q in _poster_variants(keys[t]):
+                img = douban_client.suggest_poster(q)
+                if img:
+                    break
+            index_db.save_poster(keys[t], img or "")
+            out[t] = img
+            time.sleep(0.15)  # 轻限速，避免密集请求豆瓣
+        return jsonify({"posters": out})
+
+    @api_bp.route("/poster/img", methods=["GET"])
+    def poster_img():
+        """豆瓣图床代理：/api/poster/img?u=<doubanio URL>，规避 Referer 防盗链"""
+        u = request.args.get("u", "").strip()
+        try:
+            r = douban_client.proxy_image(u)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"error": f"拉取失败: {e}"}), 502
+
+        def _stream():
+            try:
+                for chunk in r.iter_content(8192):
+                    if chunk:
+                        yield chunk
+            finally:
+                r.close()
+
+        resp = Response(_stream(),
+                        content_type=r.headers.get("Content-Type", "image/jpeg"))
+        resp.headers["Cache-Control"] = "public, max-age=604800"
+        return resp
 
     @api_bp.route("/check/run", methods=["POST"])
     def run_check():

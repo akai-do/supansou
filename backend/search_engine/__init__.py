@@ -23,6 +23,11 @@ from config import Config
 
 logger = logging.getLogger("search_engine")
 
+# 共享会话：PanSou 在本机/内网，直连不走系统代理（FlClash 等会劫持
+# localhost 请求并在代理忙碌时造成"瞬时连接拒绝"）
+_SESSION = requests.Session()
+_SESSION.trust_env = False
+
 
 class PansouClient:
     """PanSou 搜索引擎的 HTTP 客户端"""
@@ -46,7 +51,7 @@ class PansouClient:
         if not self.username or not self.password:
             return ""
         try:
-            resp = requests.post(
+            resp = _SESSION.post(
                 f"{self.base_url}/api/auth/login",
                 json={"username": self.username, "password": self.password},
                 timeout=8,
@@ -103,7 +108,7 @@ class PansouClient:
 
         def attempt(auth_headers):
             req_headers = {**headers, **auth_headers}
-            resp = requests.post(url, json=payload, timeout=self.timeout, headers=req_headers)
+            resp = _SESSION.post(url, json=payload, timeout=self.timeout, headers=req_headers)
             if resp.status_code == 401:
                 # 认证失败，尝试重新登录一次
                 self._token = None
@@ -144,7 +149,7 @@ class PansouClient:
         """检查 PanSou 是否在线"""
         url = f"{self.base_url}/api/health"
         try:
-            resp = requests.get(url, timeout=5)
+            resp = _SESSION.get(url, timeout=5)
             resp.raise_for_status()
             return resp.json()
         except Exception:
@@ -163,7 +168,7 @@ class PansouClient:
         url = f"{self.base_url}/api/check/links"
 
         def attempt(auth_headers):
-            resp = requests.post(
+            resp = _SESSION.post(
                 url,
                 json={"items": items},
                 timeout=30,

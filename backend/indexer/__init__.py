@@ -68,9 +68,53 @@ class IndexDatabase:
                 cnt     INTEGER DEFAULT 1,
                 last_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS click_stats (
+                url     TEXT NOT NULL,
+                kw      TEXT NOT NULL DEFAULT '',
+                cnt     INTEGER DEFAULT 1,
+                last_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (url, kw)
+            );
+
+            CREATE TABLE IF NOT EXISTS zero_result_watch (
+                kw       TEXT PRIMARY KEY,
+                cnt      INTEGER DEFAULT 1,
+                last_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS poster_cache (
+                key        TEXT PRIMARY KEY,
+                img        TEXT DEFAULT '',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         """)
+        # 轻量迁移：老库补列（智能有效性状态机字段）
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(link_index)")}
+        for ddl in (
+            "ALTER TABLE link_index ADD COLUMN validity TEXT DEFAULT ''",
+            "ALTER TABLE link_index ADD COLUMN fail_cnt INTEGER DEFAULT 0",
+            "ALTER TABLE link_index ADD COLUMN ok_cnt INTEGER DEFAULT 0",
+            "ALTER TABLE link_index ADD COLUMN state_summary TEXT DEFAULT ''",
+        ):
+            col = ddl.split("ADD COLUMN ")[1].split()[0]
+            if col not in cols:
+                conn.execute(ddl)
         conn.commit()
         conn.close()
+
+    def iter_titles_for_vocab(self, limit: int = 80000):
+        """标题迭代器（供纠错词库构建；分批拉取避免一次性占内存）"""
+        conn = self._conn
+        cur = conn.execute(
+            "SELECT title FROM link_index WHERE title != '' LIMIT ?", (limit,)
+        )
+        while True:
+            rows = cur.fetchmany(2000)
+            if not rows:
+                break
+            for r in rows:
+                yield r["title"]
 
     def store_links(self, links: list) -> int:
         """
@@ -159,6 +203,14 @@ class IndexDatabase:
 
         tokens = self._tokenize(keyword)
 
+        # 长查询精准模式：>8 字（长书名/教材名）时不用 CJK 2-3 字滑窗——
+        # "python与人工智能编程-基础与实践" 的"基础""实践"窗口会把
+        # 海量无关行捞进来。只保留完整词 + ASCII 词（>=4 字）。
+        if len(keyword) > 8:
+            ascii_tokens = [t for t in tokens
+                            if all(ord(c) < 128 for c in t) and len(t) >= 4]
+            tokens = [keyword] + [t for t in ascii_tokens if t != keyword]
+
         # 组装 WHERE 条件：token 之间 OR。
         # 短 token（<4 字符）只匹配标题——网盘分享码是随机字符串，
         # 短子串碰上 URL 会捞回大量无关行（垃圾查询的噪声来源）。
@@ -189,7 +241,8 @@ class IndexDatabase:
 
         sql = f"""
             SELECT id, url, password, title, disk_type, source,
-                   first_seen, last_seen, checked_at, alive, search_cnt
+                   first_seen, last_seen, checked_at, alive, search_cnt,
+                   validity, fail_cnt, ok_cnt, state_summary
             FROM link_index
             WHERE {' AND '.join(conditions)}
             ORDER BY alive DESC, {order_expr}, search_cnt DESC, last_seen DESC
@@ -261,13 +314,155 @@ class IndexDatabase:
             if tok not in tokens:
                 tokens.append(tok)
 
-    def update_alive_status(self, url: str, alive: bool):
-        """更新单条链接的存活状态"""
-        self._conn.execute(
-            "UPDATE link_index SET alive = ?, checked_at = ? WHERE url = ?",
-            (1 if alive else 0, datetime.now().isoformat(), url)
+    # ==========================================
+    # 智能有效性状态机
+    # PanSou 检测状态 → validity 映射：
+    #   ok        → 'ok'      有效
+    #   bad       → 连续 DEAD_CONFIRM_STREAK 次才置 'dead'，首次为 'suspect'
+    #   uncertain → 'suspect' 检测源要求验证，不武断判死，仅降权
+    #   unsupported → 不改状态（磁力/ed2k 等无法检测）
+    # ==========================================
+
+    def apply_check_result(self, url: str, state: str, summary: str = "") -> dict:
+        """
+        将一次检测结果写入状态机（智能有效性检测的核心写入点）。
+
+        返回 {"validity": ..., "alive": ...}；URL 不在库中返回 validity=None。
+        """
+        conn = self._conn
+        row = conn.execute(
+            "SELECT validity, alive, fail_cnt, ok_cnt FROM link_index WHERE url = ?",
+            (url,)
+        ).fetchone()
+        if row is None:
+            return {"validity": None, "alive": None}
+
+        validity = row["validity"] or ""
+        alive = row["alive"]
+        fail_cnt = row["fail_cnt"] or 0
+        ok_cnt = row["ok_cnt"] or 0
+        now = datetime.now().isoformat()
+
+        if state == "ok":
+            ok_cnt += 1
+            fail_cnt = 0
+            validity = "ok"
+            alive = 1
+        elif state == "bad":
+            fail_cnt += 1
+            ok_cnt = 0
+            if fail_cnt >= Config.DEAD_CONFIRM_STREAK:
+                validity = "dead"
+                alive = 0
+            else:
+                # 首次失败先按疑似处理，等待复检确认，防误杀
+                validity = "suspect"
+                alive = 1
+        elif state == "uncertain":
+            ok_cnt = 0
+            validity = "suspect"
+            alive = 1
+        else:
+            # unsupported / 未知状态：不动状态机，仅刷新检测时间
+            conn.execute(
+                "UPDATE link_index SET checked_at = ? WHERE url = ?",
+                (now, url)
+            )
+            conn.commit()
+            return {"validity": validity, "alive": alive}
+
+        conn.execute(
+            "UPDATE link_index SET validity = ?, alive = ?, fail_cnt = ?, ok_cnt = ?, "
+            "state_summary = ?, checked_at = ? WHERE url = ?",
+            (validity, alive, fail_cnt, ok_cnt, (summary or "")[:60], now, url)
         )
-        self._conn.commit()
+        conn.commit()
+        return {"validity": validity, "alive": alive}
+
+    def mark_reported_dead(self, url: str) -> bool:
+        """
+        用户举报失效：直接确认（用户亲眼所见优先于检测源），计数 +1 供后续复查参考。
+        URL 不在库中则补一条占位记录，保证举报不丢。
+        """
+        conn = self._conn
+        cur = conn.execute(
+            "UPDATE link_index SET validity = 'dead', alive = 0, fail_cnt = fail_cnt + 1, "
+            "ok_cnt = 0, state_summary = '用户举报失效', checked_at = ? WHERE url = ?",
+            (datetime.now().isoformat(), url)
+        )
+        if cur.rowcount == 0:
+            conn.execute(
+                "INSERT INTO link_index (url, validity, alive, fail_cnt, ok_cnt, "
+                "state_summary, checked_at) VALUES (?, 'dead', 0, 1, 0, '用户举报失效', ?)",
+                (url, datetime.now().isoformat())
+            )
+        conn.commit()
+        return True
+
+    def get_validity_map(self, urls: list) -> dict:
+        """
+        批量读取链接的当前有效性状态。
+        返回 {url: {"validity", "alive", "fail_cnt", "state_summary", "checked_at"}}。
+        老数据 validity 为空但 alive=0 的行按 'dead' 返回。
+        """
+        out = {}
+        if not urls:
+            return out
+        conn = self._conn
+        for i in range(0, len(urls), 500):
+            chunk = [u for u in urls[i:i + 500] if u]
+            if not chunk:
+                continue
+            ph = ",".join(["?" for _ in chunk])
+            rows = conn.execute(
+                f"SELECT url, validity, alive, fail_cnt, state_summary, checked_at "
+                f"FROM link_index WHERE url IN ({ph})", chunk
+            ).fetchall()
+            for r in rows:
+                v = r["validity"] or ("dead" if r["alive"] == 0 else "")
+                out[r["url"]] = {
+                    "validity": v,
+                    "alive": r["alive"],
+                    "fail_cnt": r["fail_cnt"] or 0,
+                    "state_summary": r["state_summary"] or "",
+                    "checked_at": r["checked_at"] or "",
+                }
+        return out
+
+    def get_smart_check_candidates(self, limit: int = 200) -> list:
+        """
+        智能巡检候选：按优先级取"需要检测"的链接。
+          0. 疑似失效（复检窗口最短，尽快确认或洗白）
+          1. 从未检测的新链接（越新越可能被用户使用）
+          2. 确认失效但超过复查 TTL（探测恢复）
+          3. 有效但超过保鲜 TTL 的
+        磁力/ed2k 等检测源不支持的类型直接跳过。
+        """
+        now = datetime.now()
+        dead_cutoff = (now - timedelta(hours=Config.VALIDITY_DEAD_TTL_HOURS)).isoformat()
+        ok_cutoff = (now - timedelta(hours=Config.VALIDITY_OK_TTL_HOURS)).isoformat()
+        rows = self._conn.execute("""
+            SELECT url, password, disk_type, validity, alive, fail_cnt, checked_at
+            FROM link_index
+            WHERE disk_type NOT IN ('magnet', 'ed2k')
+              AND (
+                validity = 'suspect'
+                OR checked_at IS NULL
+                OR (validity = 'dead' AND checked_at < ?)
+                OR (validity = 'ok' AND checked_at < ?)
+                OR (validity = '' AND alive = 1 AND checked_at < ?)
+                OR (validity = '' AND alive = 0)
+              )
+            ORDER BY CASE validity
+                        WHEN 'suspect' THEN 0
+                        WHEN '' THEN 1
+                        WHEN 'dead' THEN 2
+                        ELSE 3
+                     END,
+                     checked_at ASC NULLS FIRST
+            LIMIT ?
+        """, (dead_cutoff, ok_cutoff, ok_cutoff, limit)).fetchall()
+        return [dict(r) for r in rows]
 
     # ==========================================
     # 搜索历史
@@ -305,6 +500,96 @@ class IndexDatabase:
             )
         else:
             cur = self._conn.execute("DELETE FROM search_history")
+        self._conn.commit()
+        return cur.rowcount
+
+    # ==========================================
+    # 点击统计（热度反哺排序）
+    # ==========================================
+
+    def record_click(self, url: str, kw: str = ""):
+        """记录一次结果点击（UPSERT：同一 (url, kw) 累计次数）"""
+        url = (url or "").strip()
+        if not url:
+            return
+        kw = (kw or "").strip().lower()
+        now = datetime.now().isoformat()
+        self._conn.execute("""
+            INSERT INTO click_stats (url, kw, cnt, last_at)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(url, kw) DO UPDATE SET
+                cnt = cnt + 1,
+                last_at = ?
+        """, (url, kw, now, now))
+        self._conn.commit()
+
+    def get_click_stats(self, keyword: str = None) -> dict:
+        """
+        查询点击统计，供排序加权。
+
+        返回 {url: {"kw": 该关键词下点击数, "total": 全局点击数}}。
+        """
+        out = {}
+        rows = self._conn.execute(
+            "SELECT url, SUM(cnt) AS c FROM click_stats GROUP BY url"
+        ).fetchall()
+        for r in rows:
+            out[r["url"]] = {"kw": 0, "total": r["c"] or 0}
+
+        kw = (keyword or "").strip().lower()
+        if kw:
+            rows = self._conn.execute(
+                "SELECT url, cnt FROM click_stats WHERE kw = ?", (kw,)
+            ).fetchall()
+            for r in rows:
+                if r["url"] in out:
+                    out[r["url"]]["kw"] = r["cnt"]
+                else:
+                    out[r["url"]] = {"kw": r["cnt"], "total": r["cnt"]}
+        return out
+
+    def clear_click_heat(self, url: str) -> int:
+        """撤销某链接的全部点击热度（确认失效时调用，防止死链靠点击置顶）"""
+        cur = self._conn.execute(
+            "DELETE FROM click_stats WHERE url = ?", (url,)
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    # ==========================================
+    # 零结果守望队列
+    # 「今天搜不到的，系统替你守着」——实时+历史全空的词入队，
+    # harvester 每轮收割时自动重试全源，命中即出队入库。
+    # ==========================================
+
+    def record_zero_result(self, keyword: str):
+        """记录一次零结果搜索（UPSERT 累计等待次数）"""
+        kw = (keyword or "").strip()
+        if not kw:
+            return
+        now = datetime.now().isoformat()
+        self._conn.execute("""
+            INSERT INTO zero_result_watch (kw, cnt, last_at)
+            VALUES (?, 1, ?)
+            ON CONFLICT(kw) DO UPDATE SET
+                cnt = cnt + 1,
+                last_at = ?
+        """, (kw, now, now))
+        self._conn.commit()
+
+    def get_zero_result_keywords(self, limit: int = 8) -> list:
+        """守望队列：最久未命中的词优先重试"""
+        rows = self._conn.execute(
+            "SELECT kw FROM zero_result_watch ORDER BY last_at ASC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        return [r["kw"] for r in rows]
+
+    def resolve_zero_result(self, keyword: str) -> int:
+        """守望命中（搜到结果了），出队"""
+        cur = self._conn.execute(
+            "DELETE FROM zero_result_watch WHERE kw = ?", (keyword,)
+        )
         self._conn.commit()
         return cur.rowcount
 
@@ -346,6 +631,41 @@ class IndexDatabase:
             "by_type": by_type,
             "hot_keywords": hot_keywords,
         }
+
+    # ==========================================
+    # 封面海报缓存（豆瓣匹配结果持久化）
+    # ==========================================
+
+    def get_posters(self, keys: list) -> dict:
+        """批量读封面缓存：{key: img 或 ''}（''=查过但没有匹配，防重复请求豆瓣）"""
+        out = {}
+        if not keys:
+            return out
+        conn = self._conn
+        for i in range(0, len(keys), 200):
+            chunk = [k for k in keys[i:i + 200] if k]
+            if not chunk:
+                continue
+            ph = ",".join(["?" for _ in chunk])
+            rows = conn.execute(
+                f"SELECT key, img FROM poster_cache WHERE key IN ({ph})", chunk
+            ).fetchall()
+            for r in rows:
+                out[r["key"]] = r["img"] or ""
+        return out
+
+    def save_poster(self, key: str, img: str):
+        """写入封面缓存（img 可为空串=无匹配）"""
+        key = (key or "").strip()
+        if not key:
+            return
+        self._conn.execute("""
+            INSERT INTO poster_cache (key, img, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                img = excluded.img,
+                updated_at = excluded.updated_at
+        """, (key, img or "", datetime.now().isoformat()))
+        self._conn.commit()
 
     def close(self):
         if hasattr(self._local, "conn") and self._local.conn:

@@ -90,6 +90,35 @@ class Harvester:
                 time.sleep(2)
 
         logger.info(f"[Harvester] 本轮收割完成，累计: {self.total_harvested} 条")
+        self._harvest_watch_queue()
+
+    def _harvest_watch_queue(self):
+        """零结果守望队列：用户搜过但没有的词，每轮用全源重试，命中即出队入库"""
+        try:
+            watch_kws = self.index_db.get_zero_result_keywords(limit=8)
+        except Exception as e:
+            logger.error(f"[守望] 读取守望队列失败: {e}")
+            return
+        if not watch_kws:
+            return
+        logger.info(f"[守望] 重试 {len(watch_kws)} 个零结果词: {watch_kws}")
+        for kw in watch_kws:
+            try:
+                links = self.search_func(kw)
+                if links:
+                    count = self.index_db.store_links(links)
+                    if count > 0:
+                        self.index_db.resolve_zero_result(kw)
+                        self.total_harvested += count
+                        logger.info(f"[守望] ✅ '{kw}' 有货了! 入库 {count} 条，已出队")
+                    else:
+                        self.index_db.resolve_zero_result(kw)
+                else:
+                    # 仍无结果：留在队列，last_at 已被 record 刷新过的不动
+                    pass
+            except Exception as e:
+                logger.error(f"[守望] '{kw}' 重试失败: {e}")
+            time.sleep(2)
 
     def get_stats(self) -> dict:
         return {
