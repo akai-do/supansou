@@ -1,0 +1,72 @@
+# DuPanSou-Archive 一键全栈：PanSou 搜索引擎 + 本项目后端
+# 用法：docker compose up -d，然后打开 http://localhost:5000
+services:
+
+  pansou:
+    image: ghcr.io/fish2018/pansou:latest
+    container_name: pansou
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+    environment:
+      PORT: 8888
+      AUTH_ENABLED: "false"
+      CACHE_ENABLED: "true"
+      # ⚠️ 频道与插件决定召回量：下面是经过实测的推荐列表。
+      # 最小启动（不配置这两项）只监听 1 个默认频道。
+      CHANNELS: >-
+        tgsearchers7,Aliyun_4K_Movies,yunpanx,yp123pan,yunpanxunlei,tianyifc,
+        peccxinpd,gotopan,PanjClub,baicaoZY,MCPH02,MCPH03,bdwpzhpd,Q66Share,
+        ucwpzy,shareAliyun,Quark_Movies,XiangxiuNBB,ucquark,xx123pan,
+        yingshifenxiang123,zyfb123,Lsp115,taoxgzy,Channel_Shares_115,vip115hot,
+        wp123zy,yunpan139,yunpan189,yunpanuc,yydf_hzl,leoziyuan,yoyokuakeduanju,
+        TG654TG,QukanMovie,yeqingjie_GJG666,movielover8888_film3,Baidu_netdisk,
+        D_wusun,FLMdongtianfudi,KaiPanshare,rjyxfx,PikPak_Share_Channel,
+        newproductsourcing,QuarkFree,yunpanNB,kkdj001,xxzlzn,pxyunpanxunlei,
+        jxwpzy,kuakedongman,xiangnikanj,solidsexydoll,guoman4K,zdqxm,kduanju,
+        cilidianying,CBduanju,SharePanFilms,dzsgx,BooksRealm,douerpan,
+        Netdisk_Movies,yunpanquark,ciliziyuanku,jzmm_123pan,wpan8,mqte5,
+        regengguangya,regeng115,regeng123,yy80986098,pan_guangya,
+        guangyapan_episode,guangya_hdhive,guangyapindao,quark_res,domgmingapk,
+        dianying4k,tgbokee,ucshare,gokuapan,WFYSFX03,gimy100,gimy115iso,fcij5,
+        xvth5,xuexiziliaobaibaoku,phzvip,jdbigdiscount,youxigs,zhoulanziyuan,
+        seedhub_pro,jnjy_5,xxziliao,wpzyk,ruanjianfenxiang77,jpnd5,XunLeiPinDao,
+        a123fxme,WPpindao,kuyupan,djya5,zh_vip,gdsharing,guangyaya2026,
+        alyp_17362,baidyunpan,yunpans,rbzhwpzy
+      ENABLED_PLUGINS: >-
+        dyyjpro,duoduo,djgou,feikuai,gaoqing888,gying,hdmoli,haitunsou,
+        hunhepan,ikantv,jutoushe,kkv,dy4k,libvio,lingjisp,lou1,melost,meitizy,
+        miosou,nyaa,ouge,panlian,pansearch,qqpd,quark4k,quarksoo,quarktv,
+        qupanshe,sousou,thepiratebay,ting77,wanou,weibo,xb6v,xiaokupan,
+        xiaozhang,xiaoyu,yingso,yulinshufa,yunso,yunsou,zlxapp,zxzj,rrbt,
+        quarkres,diduan,erxiao,huban,labi,muou,shandian,zhizhen,clxiong,cyg,
+        jsnoteclub,duanjuw,dyyj,nsgame,cldi,clmao,susu,u3c3,5266ys,dygang,
+        leso,btbtlb,aipan,sopanya
+    # PanSou 开启认证时（AUTH_ENABLED=true），取消注释并设置：
+    #   AUTH_ENABLED: "true"
+    #   AUTH_USERNAME: admin
+    #   AUTH_PASSWORD: 你的密码
+    # 并在后端 environment 中设置 PANSOU_USERNAME / PANSOU_PASSWORD。
+
+  backend:
+    build: ./backend
+    container_name: dupansou-backend
+    restart: unless-stopped
+    depends_on:
+      - pansou
+    ports:
+      - "5000:5000"
+    environment:
+      PORT: "5000"
+      # 容器内必须监听 0.0.0.0 才能被宿主机访问
+      HOST: 0.0.0.0
+      DEBUG: "0"
+      PANSOU_BASE_URL: http://pansou:8888
+      # PANSOU_USERNAME: admin
+      # PANSOU_PASSWORD: 你的密码
+    volumes:
+      # 索引库持久化：重建容器不丢积累的索引
+      - backend-data:/app/data
+
+volumes:
+  backend-data:
