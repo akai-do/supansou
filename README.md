@@ -192,3 +192,4 @@ DuPanSou-Archive/
 本项目基于 [MIT License](LICENSE)。
 
 **实时搜索引擎**基于 [fish2018/pansou](https://github.com/fish2018/pansou)（MIT 许可证）作为基础设施，感谢原作。
+# supansou
