@@ -142,9 +142,9 @@ export default {
           this.hiddenDead = data.hidden_dead || []
           this.hiddenDeadCount = data.hidden_dead_count || 0
           this.showHidden = false
-          // 渲染后异步补强：智能有效性检测 + 封面匹配
-          this.smartCheck()
+          // 渲染后异步补强：封面图优先于智能检测（图片是用户最直观的反馈）
           this.loadPosters()
+          this.smartCheck()
         }
       } catch (e) {
         this.error = '请求失败: ' + e.message
@@ -323,15 +323,21 @@ export default {
         }
       }
       if (!titles.length) return
-      try {
-        const resp = await fetch(`${API}/poster/batch`, {
+      // 分两波并行请求：先回来的先渲染，不等全量
+      const mid = Math.ceil(titles.length / 2)
+      for (const chunk of [titles.slice(0, mid), titles.slice(mid)]) {
+        if (!chunk.length) continue
+        fetch(`${API}/poster/batch`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ titles }),
+          body: JSON.stringify({ titles: chunk }),
         })
-        const data = await resp.json()
-        if (data.posters) this.posters = { ...this.posters, ...data.posters }
-      } catch (e) { /* 封面失败静默兜底占位块 */ }
+          .then(r => r.json())
+          .then(data => {
+            if (data.posters) this.posters = { ...this.posters, ...data.posters }
+          })
+          .catch(() => { /* 封面失败静默兜底占位块 */ })
+      }
     },
     // ===== 举报 =====
     async reportDead(item) {

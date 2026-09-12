@@ -20,6 +20,11 @@ export default {
   computed: {
     dead() { return cardDead(this.item) },
     suspect() { return cardSuspect(this.item) },
+    // 消息封面兜底：主链无图时从同资源变体里找
+    msgImage() {
+      return this.item.msg_image ||
+        (this.item.variants || []).map(v => v.msg_image).find(Boolean) || ''
+    },
     diskLabel() { return DISK_LABELS[this.item.disk_type] || this.item.disk_type || '其他' },
     tagCls() { return DISK_TAG_CLASS[this.item.disk_type] || 'tag-other' },
     vb() { return validityBadge(this.item) },
@@ -65,7 +70,9 @@ export default {
 
 <template>
   <div class="res-card" :class="{ 'card-dead': dead, 'card-suspect': suspect }">
-    <PosterImg v-if="showPoster" class="res-poster" :src="poster" :alt="item.title" :label="diskLabel" />
+    <PosterImg v-if="showPoster" class="res-poster"
+               :src="poster || msgImage" :alt="item.title" :label="diskLabel"
+               :start-proxy="!poster && !!msgImage" />
     <div class="res-body">
       <div class="res-title" :title="item.title">{{ item.title || '(无标题)' }}</div>
       <div class="res-meta">

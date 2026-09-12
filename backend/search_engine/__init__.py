@@ -230,6 +230,8 @@ def extract_links_from_result(response: dict) -> list:
             uid = str(msg.get("unique_id") or "")
             source = (msg.get("channel") or uid.split("-")[0] or "unknown").strip()
             msg_dt = msg.get("datetime", "")
+            # TG 消息自带图片（频道海报/截图）——非影视资源也有封面
+            msg_image = (msg.get("images") or [""])[0] if msg.get("images") else ""
             for l in (msg.get("links") or []):
                 url = (l.get("url") or "").strip()
                 if not url:
@@ -241,6 +243,7 @@ def extract_links_from_result(response: dict) -> list:
                     "disk_type": (l.get("type") or "").strip().lower(),
                     "source": source,
                     "datetime": l.get("datetime") or msg_dt,
+                    "msg_image": (l.get("images") or [""])[0] if l.get("images") else msg_image,
                 })
         if links:
             return links
@@ -249,6 +252,7 @@ def extract_links_from_result(response: dict) -> list:
     merged = data.get("merged_by_type") or {}
     for disk_type, items in merged.items():
         for item in items:
+            images = item.get("images") or []
             links.append({
                 "url": item.get("url", ""),
                 "password": item.get("password", ""),
@@ -256,6 +260,7 @@ def extract_links_from_result(response: dict) -> list:
                 "disk_type": disk_type,
                 "source": item.get("source", "unknown"),
                 "datetime": item.get("datetime", ""),
+                "msg_image": images[0] if images and images[0] else "",
             })
 
     return links

@@ -93,3 +93,5 @@ class Config:
     ENABLE_POSTERS = os.getenv("ENABLE_POSTERS", "1") == "1"
     DOUBAN_TIMEOUT = float(os.getenv("DOUBAN_TIMEOUT", "6"))
     DOUBAN_HOT_TTL_SECONDS = int(os.getenv("DOUBAN_HOT_TTL_SECONDS", "3600"))
+    # "无匹配"封面的缓存时长（过期后重试；豆瓣限流期的空结果不会永久粘连）
+    POSTER_EMPTY_TTL_HOURS = int(os.getenv("POSTER_EMPTY_TTL_HOURS", "24"))

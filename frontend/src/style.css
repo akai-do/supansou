@@ -128,7 +128,7 @@ body {
   background: var(--topbar-bg); backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border);
 }
-.dock { flex: 1; max-width: 720px; }
+.dock { flex: 1; }
 .theme-btn {
   width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--border);
   background: var(--bg-card); cursor: pointer; font-size: 16px; flex-shrink: 0;
@@ -141,22 +141,36 @@ body {
 /* 移动端 */
 .tabbar { display: none; }
 
-/* ============ 搜索条 ============ */
-.search-dock { display: flex; gap: 8px; }
-.search-dock input {
-  flex: 1; padding: 10px 18px; border-radius: 999px;
+/* ============ 搜索条（CloudSaver 式宽幅） ============ */
+.search-dock { display: flex; gap: 10px; width: 100%; }
+.sd-field { position: relative; flex: 1; display: flex; align-items: center; min-width: 0; }
+.sd-icon {
+  position: absolute; left: 15px; font-size: 15px;
+  opacity: .55; pointer-events: none;
+}
+.sd-field input {
+  width: 100%; padding: 12px 44px 12px 42px;
+  border-radius: 12px;
   border: 1px solid var(--border); background: var(--bg-card); color: var(--text);
-  font-size: 14px; outline: none; box-shadow: var(--shadow);
+  font-size: 15px; outline: none; box-shadow: var(--shadow);
   transition: all .15s; min-width: 0;
 }
-.search-dock input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
-.search-dock input::placeholder { color: var(--text-secondary); }
-.search-dock button {
-  padding: 10px 22px; border-radius: 999px; border: none;
-  background: var(--primary); color: #fff; font-size: 14px; cursor: pointer;
+.sd-field input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.sd-field input::placeholder { color: var(--text-secondary); }
+.sd-clear {
+  position: absolute; right: 12px;
+  width: 22px; height: 22px; border-radius: 50%;
+  border: none; background: var(--bg-card-hover); color: var(--text-secondary);
+  font-size: 13px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.sd-clear:hover { color: var(--danger); }
+.sd-btn {
+  padding: 12px 28px; border-radius: 12px; border: none;
+  background: var(--primary); color: #fff; font-size: 15px; cursor: pointer;
   transition: background .15s; flex-shrink: 0;
 }
-.search-dock button:hover { background: var(--primary-hover); }
+.sd-btn:hover { background: var(--primary-hover); }
 
 /* ============ 页面通用 ============ */
 .page-title { margin-bottom: 18px; }
@@ -398,8 +412,10 @@ html.dark .tag-pikpak { color: #fb923c; }
 
 /* ============ 豆瓣榜单 ============ */
 .douban-tabs { margin-bottom: 16px; }
+.sort-row { margin-bottom: 8px; }
+.sort-label { font-size: 12px; color: var(--text-secondary); }
 .douban-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 14px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(172px, 1fr)); gap: 14px;
 }
 .d-card {
   background: var(--bg-card); border: 1px solid var(--border);
@@ -408,14 +424,32 @@ html.dark .tag-pikpak { color: #fb923c; }
 }
 .d-card:hover { border-color: var(--primary); transform: translateY(-2px); box-shadow: var(--shadow-lg); }
 .d-card.skel { cursor: default; }
-.d-poster { width: 100%; aspect-ratio: 2 / 3; }
+.d-poster-wrap { position: relative; width: 100%; aspect-ratio: 2 / 3; }
+.d-poster { width: 100%; height: 100%; }
+.d-score, .d-tier {
+  position: absolute; top: 8px; z-index: 2;
+  padding: 2px 7px; border-radius: 5px;
+  font-size: 11px; font-weight: 700; color: #fff;
+  background: rgba(0, 0, 0, .62); backdrop-filter: blur(4px);
+}
+.d-score { left: 8px; color: #ffb02e; }
+.d-tier { right: 8px; background: rgba(230, 90, 40, .88); }
 .d-info { padding: 8px 10px 4px; }
 .d-title {
   font-size: 13px; font-weight: 600; color: var(--text);
   display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden;
 }
-.d-rate { font-size: 12px; color: var(--warning); margin-top: 2px; }
-.d-btn { margin: 6px 10px 10px; justify-content: center; }
+.d-sub {
+  font-size: 11px; color: var(--text-secondary); margin-top: 3px; line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.d-meta { font-size: 11px; color: var(--warning); margin-top: 4px; }
+.d-btns { display: flex; gap: 6px; padding: 8px 10px 10px; }
+.d-btns .btn { flex: 1; justify-content: center; }
+.d-btn { margin: 0; }
+.more-row { display: flex; justify-content: center; padding: 18px 0 6px; }
+.more-btn { padding: 9px 36px; font-size: 13px; border-radius: 999px; }
+.more-end { font-size: 13px; color: var(--text-secondary); }
 
 /* ============ 统计页 ============ */
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 24px; }

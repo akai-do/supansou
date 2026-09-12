@@ -13,7 +13,9 @@ PanSou Search API（来自 Go 后端）是搜索引擎基础设施，本 API 是
 import logging
 import re
 import time
+import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from flask import Blueprint, request, jsonify, redirect, Response
 from datetime import datetime
 from config import Config
@@ -167,10 +169,12 @@ def _build_supplement_variants(keyword: str) -> list:
 
 
 def _link_quality(it: dict) -> float:
-    """URL 撞车时选信息更全的一条：带密码 > 标题完整 > 有时间"""
+    """URL 撞车时选信息更全的一条：带密码 > 带消息图 > 标题完整 > 有时间"""
     q = 0.0
     if it.get("password"):
         q += 2.0
+    if it.get("msg_image"):
+        q += 0.4  # 有消息图的优先，避免去重时把封面挤掉
     q += min(len(str(it.get("title") or "")), 80) / 40.0
     if it.get("datetime"):
         q += 1.0
@@ -455,7 +459,7 @@ def _rep_score(it: dict) -> float:
 
 _VARIANT_FIELDS = ("url", "password", "disk_type", "source",
                    "datetime", "last_seen", "alive", "from_archive", "title",
-                   "validity", "state_summary", "checked_at")
+                   "validity", "state_summary", "checked_at", "msg_image")
 
 
 def _group_resources(ranked: list, limit: int = 60) -> list:
@@ -489,6 +493,10 @@ def _group_resources(ranked: list, limit: int = 60) -> list:
             continue
         rep = max(members, key=_rep_score)
         card = dict(rep)
+        # 主链没有消息封面时，从任一带图的同资源成员继承
+        if not card.get("msg_image"):
+            card["msg_image"] = next(
+                (m.get("msg_image") for m in members if m.get("msg_image")), "")
         card["variants"] = [
             {k: m.get(k) for k in _VARIANT_FIELDS}
             for m in members if m is not rep
@@ -541,6 +549,16 @@ def _invalidate_kw_cache(kw: str):
 # 资源封面：标题 → 豆瓣海报匹配
 # ==========================================
 
+def _hot_ok(title: str) -> bool:
+    """热搜词降噪：过滤带 URL/@/超长的标题，保证搜索页 chips 观感"""
+    t = (title or "").strip()
+    if not t or len(t) > 28:
+        return False
+    if re.search(r"https?:|www\.|t\.me/|@", t, re.IGNORECASE):
+        return False
+    return True
+
+
 def _poster_query(title: str) -> str:
     """
     资源标题 → 豆瓣建议搜索的查询串。
@@ -550,12 +568,12 @@ def _poster_query(title: str) -> str:
     t = (title or "").strip()
     if not t:
         return ""
-    # 以【】开头的标题取第一个括号内的内容；否则截到第一个包装段落/分隔符
-    m = re.match(r"^[【\[]\s*(.+?)\s*[】\]]", t)
+    # 以【】/《》开头的标题取第一个括号内的内容；否则截到第一个包装段落/分隔符
+    m = re.match(r"^[【\[《「]\s*(.+?)\s*[】\]》」]", t)
     if m:
         t = m.group(1).strip()
     else:
-        t = re.split(r"[【\[（(«]|·| - | \| |💾|📁|💬", t)[0].strip() or t
+        t = re.split(r"[【\[（(«《「]|·| - | \| |💾|📁|💬", t)[0].strip() or t
     # 去画质/集数/季数噪声
     t = re.sub(
         r"(全\d+集|\d+集全|更新至\d+集|第?\d+\s*[季期]|4k|8k|1080p|720p|"
@@ -666,6 +684,103 @@ def _background_smart_check(checker, cards: list, cache_key: str):
 def register_routes(app, searcher, index_db, checker, analyzer,
                     pansou_client, douban_client=None):
     """注册所有路由（由 app.py 调用注入依赖）"""
+
+    # ==========================================
+    # 封面单飞解析 + 后台预热
+    # 相同查询词全局只解析一次（in-flight 去重）；搜索后把前排卡片
+    # 标题投入预热队列，后台 worker 持续填充 poster_cache：
+    # 热门资源第二次搜索秒出图，第一次搜索由 poster/batch 的
+    # 内联等待（2.5s）兜底。熔断期间 worker 自动暂停不污染缓存。
+    # ==========================================
+    poster_pool = ThreadPoolExecutor(max_workers=6)
+    poster_inflight = {}
+    poster_inflight_lock = threading.Lock()
+    warm_queue = queue.Queue(maxsize=800)
+    _warm_state = {"seen": set()}
+
+    def _resolve_key(key):
+        """解析单个查询词的封面并落缓存；熔断期返回 None 且不落库"""
+        if douban_client.cooldown_active():
+            return None
+        img = None
+        for q in _poster_variants(key):
+            img = douban_client.suggest_poster(q)
+            if img:
+                break
+        if img is None and douban_client.cooldown_active():
+            return None  # 解析中途进入熔断：空结果不可信，不落缓存
+        index_db.save_poster(key, img or "")
+        return img
+
+    def _submit_keys(keys):
+        """提交解析任务（全局去重），返回 {key: Future}；顺带清理已完成的旧任务"""
+        with poster_inflight_lock:
+            for k in [k for k, f in poster_inflight.items() if f.done()]:
+                poster_inflight.pop(k, None)
+            futs = {}
+            for k in keys:
+                if not k:
+                    continue
+                if k not in poster_inflight:
+                    poster_inflight[k] = poster_pool.submit(_resolve_key, k)
+                futs[k] = poster_inflight[k]
+            return futs
+
+    def _wait_futures(futs, wait: float):
+        """等待解析结果；超时/异常返回 None（调用方按无匹配处理，缓存已由 worker 落）"""
+        out = {}
+        deadline = time.time() + wait
+        for k, f in futs.items():
+            try:
+                out[k] = f.result(timeout=max(0.05, deadline - time.time()))
+            except Exception:
+                out[k] = None
+        with poster_inflight_lock:
+            for k, f in futs.items():
+                if poster_inflight.get(k) is f and f.done():
+                    poster_inflight.pop(k, None)
+        return out
+
+    def _enqueue_warm(keys):
+        """投递预热队列（去重；集合超 2000 清一次，重复请求由缓存兜底）"""
+        for k in keys:
+            if not k:
+                continue
+            with poster_inflight_lock:
+                seen = _warm_state["seen"]
+                if k in seen:
+                    continue
+                seen.add(k)
+                if len(seen) > 2000:
+                    seen.clear()
+            try:
+                warm_queue.put_nowait(k)
+            except queue.Full:
+                break
+
+    def _warm_worker():
+        while True:
+            key = warm_queue.get()
+            try:
+                if key in index_db.get_posters([key]):
+                    continue  # 缓存仍新鲜
+                while douban_client.cooldown_active():
+                    time.sleep(15)  # 豆瓣限流期挂起，恢复后继续
+                _wait_futures(_submit_keys([key]), wait=60)
+            except Exception as e:
+                logger.error(f"[封面预热] {key[:30]!r} 失败: {e}")
+            finally:
+                warm_queue.task_done()
+
+    if not _warm_state.get("started"):
+        _warm_state["started"] = True
+        threading.Thread(target=_warm_worker, daemon=True,
+                         name="poster-warmer").start()
+        try:
+            _enqueue_warm(_poster_query(h["keyword"])
+                          for h in index_db.get_history(15))
+        except Exception:
+            pass
 
     @api_bp.route("/search", methods=["POST"])
     def search():
@@ -908,6 +1023,13 @@ def register_routes(app, searcher, index_db, checker, analyzer,
                     logger.info(f"[智能检测] '{kw}' 隐藏 {len(hidden_dead_cards)} "
                                 f"张失效资源卡")
                 cards = visible_cards
+
+            # ★ 投递封面预热：前排卡片标题后台解析，下次请求秒出图
+            try:
+                _enqueue_warm(_poster_query(c.get("title") or "")
+                              for c in cards[:12])
+            except Exception:
+                pass
 
             # ★ 记录搜索历史（仅真实搜索计数，缓存翻页不计）
             try:
@@ -1210,31 +1332,49 @@ def register_routes(app, searcher, index_db, checker, analyzer,
 
     @api_bp.route("/hot", methods=["GET"])
     def hot_keywords():
-        """热搜词（索引热词 top20）+ 索引总量，供搜索页热搜行"""
+        """热搜词（索引热词 top20，已降噪过滤）+ 索引总量，供搜索页热搜行"""
         try:
             st = index_db.get_stats()
-            return jsonify({"hot": st.get("hot_keywords") or [],
-                            "total": st.get("total", 0)})
+            raw = st.get("hot_keywords") or []
+            hot = [h for h in raw if _hot_ok(h.get("title") or "")][:20]
+            return jsonify({"hot": hot, "total": st.get("total", 0)})
         except Exception as e:
             return jsonify({"hot": [], "total": 0, "error": str(e)})
 
     @api_bp.route("/douban/hot", methods=["GET"])
     def douban_hot():
         """
-        豆瓣榜单代理（结果服务端缓存 1h）
+        豆瓣榜单（v2 富信息：card_subtitle/评分人数/大图，结果缓存 1h）
 
-        参数: type=movie|tv, tag=热门|综艺|国产剧|..., page_start=0(翻页)
+        参数:
+            collection: 榜单 ID（movie_hot/movie_latest/movie_gems/tv_hot/
+                        tv_domestic/tv_american/tv_korean/tv_japanese/
+                        tv_animation/tv_variety_show/tv_documentary）
+            start/count: 分页
+            （兼容旧参数 type/category/tag）
         """
+        collection = request.args.get("collection", "").strip()
+        try:
+            start = max(0, int(request.args.get("start", "0")))
+            count = min(50, max(1, int(request.args.get("count", "25"))))
+        except (TypeError, ValueError):
+            start, count = 0, 25
+
+        if collection and douban_client:
+            items = douban_client.collection_items(collection, start, count)
+            return jsonify({
+                "items": items,
+                "enabled": bool(douban_client.enabled),
+                "error": douban_client.last_error,
+            })
+
+        # 旧参数兼容路径（type/category/tag）
         type_ = request.args.get("type", "movie")
         tag = request.args.get("tag", "热门")
-        try:
-            page_start = max(0, int(request.args.get("page_start", "0")))
-        except (TypeError, ValueError):
-            page_start = 0
         items = []
         if douban_client:
             items = douban_client.hot(type_, tag,
-                                      page_limit=25, page_start=page_start)
+                                      page_limit=count, page_start=start)
         return jsonify({
             "items": items,
             "enabled": bool(douban_client and douban_client.enabled),
@@ -1275,15 +1415,14 @@ def register_routes(app, searcher, index_db, checker, analyzer,
                 out[t] = cached[k] or None
             else:
                 missing.append(t)
-        for t in missing:
-            img = None
-            for q in _poster_variants(keys[t]):
-                img = douban_client.suggest_poster(q)
-                if img:
-                    break
-            index_db.save_poster(keys[t], img or "")
-            out[t] = img
-            time.sleep(0.15)  # 轻限速，避免密集请求豆瓣
+        if missing:
+            # ★ 单飞解析：相同查询词全局只跑一次；内联等待 2.5s，
+            #   没等到的下次搜索命中缓存（预热 worker 通常已提前解析）
+            key_by_title = {t: keys[t] for t in missing}
+            futs = _submit_keys(list(key_by_title.values()))
+            res = _wait_futures(futs, wait=2.5)
+            for t in missing:
+                out[t] = res.get(key_by_title[t])
         return jsonify({"posters": out})
 
     @api_bp.route("/poster/img", methods=["GET"])

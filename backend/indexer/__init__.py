@@ -96,6 +96,7 @@ class IndexDatabase:
             "ALTER TABLE link_index ADD COLUMN fail_cnt INTEGER DEFAULT 0",
             "ALTER TABLE link_index ADD COLUMN ok_cnt INTEGER DEFAULT 0",
             "ALTER TABLE link_index ADD COLUMN state_summary TEXT DEFAULT ''",
+            "ALTER TABLE link_index ADD COLUMN msg_image TEXT DEFAULT ''",
         ):
             col = ddl.split("ADD COLUMN ")[1].split()[0]
             if col not in cols:
@@ -150,15 +151,17 @@ class IndexDatabase:
             source = (link.get("source", "") or "").strip()
 
             try:
+                msg_image = (link.get("msg_image") or "").strip()
                 conn.execute("""
                     INSERT INTO link_index (url, password, title, disk_type,
-                                            source, first_seen, last_seen, search_cnt)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                                            source, first_seen, last_seen, search_cnt, msg_image)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
                     ON CONFLICT(url) DO UPDATE SET
                         last_seen = ?,
                         search_cnt = search_cnt + 1,
                         title = CASE WHEN ? != '' THEN ? ELSE title END,
-                        password = CASE WHEN ? != '' THEN ? ELSE password END
+                        password = CASE WHEN ? != '' THEN ? ELSE password END,
+                        msg_image = CASE WHEN ? != '' THEN ? ELSE msg_image END
                 """, (
                     url,
                     password,
@@ -166,9 +169,11 @@ class IndexDatabase:
                     disk_type,
                     source,
                     now, now,
+                    msg_image,
                     now,
                     title, title,
                     password, password,
+                    msg_image, msg_image,
                 ))
                 count += 1
             except sqlite3.IntegrityError:
@@ -242,7 +247,7 @@ class IndexDatabase:
         sql = f"""
             SELECT id, url, password, title, disk_type, source,
                    first_seen, last_seen, checked_at, alive, search_cnt,
-                   validity, fail_cnt, ok_cnt, state_summary
+                   validity, fail_cnt, ok_cnt, state_summary, msg_image
             FROM link_index
             WHERE {' AND '.join(conditions)}
             ORDER BY alive DESC, {order_expr}, search_cnt DESC, last_seen DESC
@@ -618,9 +623,9 @@ class IndexDatabase:
         ).fetchall()
         by_type = {r["disk_type"]: r["cnt"] for r in type_rows}
 
-        # 搜索热词榜（按 search_cnt 排）
+        # 搜索热词榜（按 search_cnt 排；取 60 条供 /api/hot 降噪后仍有足量）
         hot_rows = conn.execute(
-            "SELECT title, search_cnt FROM link_index WHERE title != '' ORDER BY search_cnt DESC LIMIT 20"
+            "SELECT title, search_cnt FROM link_index WHERE title != '' ORDER BY search_cnt DESC LIMIT 60"
         ).fetchall()
         hot_keywords = [{"title": r["title"], "count": r["search_cnt"]} for r in hot_rows]
 
@@ -637,10 +642,16 @@ class IndexDatabase:
     # ==========================================
 
     def get_posters(self, keys: list) -> dict:
-        """批量读封面缓存：{key: img 或 ''}（''=查过但没有匹配，防重复请求豆瓣）"""
+        """
+        批量读封面缓存：{key: img 或 ''}。
+        成功结果永久有效；"无匹配"（img=''）超过 POSTER_EMPTY_TTL_HOURS 后
+        视为过期不再返回（下次重新查询，避免豆瓣限流期的空结果永久粘连）。
+        """
         out = {}
         if not keys:
             return out
+        cutoff = (datetime.now() - timedelta(
+            hours=Config.POSTER_EMPTY_TTL_HOURS)).isoformat()
         conn = self._conn
         for i in range(0, len(keys), 200):
             chunk = [k for k in keys[i:i + 200] if k]
@@ -648,7 +659,9 @@ class IndexDatabase:
                 continue
             ph = ",".join(["?" for _ in chunk])
             rows = conn.execute(
-                f"SELECT key, img FROM poster_cache WHERE key IN ({ph})", chunk
+                f"SELECT key, img FROM poster_cache "
+                f"WHERE key IN ({ph}) AND (img != '' OR updated_at > ?)",
+                chunk + [cutoff]
             ).fetchall()
             for r in rows:
                 out[r["key"]] = r["img"] or ""
