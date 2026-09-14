@@ -132,7 +132,7 @@ export default {
 <template>
   <div class="page">
     <div class="page-title">
-      <h2>🎬 豆瓣榜单</h2>
+      <h2>豆瓣榜单</h2>
       <p>点击海报或「搜资源」跳转资源页搜索；点「豆瓣详情」打开豆瓣条目页</p>
     </div>
 
@@ -175,7 +175,7 @@ export default {
       <div class="d-card" v-for="m in sortedItems" :key="m.id || m.title">
         <div class="d-poster-wrap">
           <PosterImg class="d-poster" :src="m.pic_large || m.pic_normal || m.cover"
-                     :alt="m.title" />
+                    :alt="m.title" />
           <span class="d-score" v-if="m.rating_value > 0">{{ Number(m.rating_value).toFixed(1) }}/10</span>
           <span class="d-tier" v-if="tier(m.rating_value).label !== '待评分'">
             {{ tier(m.rating_value).label }}

@@ -163,7 +163,7 @@ export default {
       this.results = []
       this.posters = {}
       await this.fetchSearch(this.searchParams(1))
-      this.loadHistory()
+      this.rememberSearch(kw)          // 历史记在本浏览器（不再写服务器）
     },
     async goPage(p) {
       if (this.loading || p < 1 || p > this.totalPages || p === this.page) return
@@ -188,11 +188,49 @@ export default {
       } catch (e) { /* 热搜失败不打扰 */ }
     },
     async loadHistory() {
+      // 搜索历史存**本浏览器**（localStorage）：不同访客互不可见，
+      // 删除/清空也只影响自己。服务端的 /api/history 是全站聚合表且现在仅站长可读，
+      // 这里只在"本地为空 + 站长身份"时播种一次，把历史平滑带过来。
+      this.history = this.readLocalHistory()
+      if (this.history.length) return
       try {
-        const resp = await fetch(`${API}/history?limit=12`)
+        const resp = await fetch(`${API}/history?limit=12`, {
+          headers: this.accelTokenHeaders(),
+        })
+        if (!resp.ok) return          // 访客 403：不需要服务端历史
         const data = await resp.json()
-        this.history = data.history || []
+        const kw = Array.isArray(data.history) ? data.history : []
+        if (kw.length) {
+          this.history = kw
+          this.writeLocalHistory(kw)
+        }
       } catch (e) { /* 历史加载失败不阻塞搜索 */ }
+    },
+    accelTokenHeaders() {
+      const t = localStorage.getItem('dps-accel-token') || ''
+      return t ? { 'X-Access-Token': t } : {}
+    },
+    readLocalHistory() {
+      try {
+        const arr = JSON.parse(localStorage.getItem('dps-search-history') || '[]')
+        return Array.isArray(arr) ? arr.filter((x) => x && x.keyword).slice(0, 20) : []
+      } catch (e) {
+        return []
+      }
+    },
+    writeLocalHistory(arr) {
+      try {
+        localStorage.setItem('dps-search-history', JSON.stringify(arr.slice(0, 20)))
+      } catch (e) { /* 隐私模式/配额满：忽略 */ }
+    },
+    // 搜过就记一条（由 doSearch 调用）：去重置顶、上限 20
+    rememberSearch(kw) {
+      const k = (kw || '').trim()
+      if (!k) return
+      const now = new Date().toISOString().slice(0, 19).replace('T', ' ')
+      const rest = this.history.filter((h) => h.keyword !== k)
+      this.history = [{ keyword: k, last_at: now }, ...rest].slice(0, 20)
+      this.writeLocalHistory(this.history)
     },
     searchFrom(kw) {
       this.keyword = kw
@@ -204,12 +242,12 @@ export default {
       this.doSearch()
     },
     async delHistory(kw) {
-      await fetch(`${API}/history?kw=${encodeURIComponent(kw)}`, { method: 'DELETE' })
-      this.loadHistory()
+      this.history = this.history.filter((h) => h.keyword !== kw)
+      this.writeLocalHistory(this.history)
     },
     async clearHistory() {
-      await fetch(`${API}/history`, { method: 'DELETE' })
       this.history = []
+      this.writeLocalHistory([])
     },
     // ===== 粘贴网盘链接直接检测 =====
     async runLinkCheck(link) {
@@ -387,11 +425,13 @@ export default {
       </div>
       <template v-if="history.length">
         <div class="explore-title">
-          🕘 搜索历史 <a class="explore-clear" @click="clearHistory">清空</a>
+          🕘 搜索历史 <span class="explore-scope">（仅本机可见）</span>
+          <a class="explore-clear" @click="clearHistory">清空</a>
         </div>
         <div class="chips-wrap">
           <span class="chip" v-for="h in history" :key="h.keyword"
-                :title="`搜过 ${h.cnt} 次`" @click="searchFrom(h.keyword)">
+                :title="h.cnt ? `搜过 ${h.cnt} 次` : (h.last_at ? `上次搜索 ${h.last_at}` : '')"
+                @click="searchFrom(h.keyword)">
             {{ h.keyword }}
             <a class="chip-x" @click.stop="delHistory(h.keyword)">×</a>
           </span>

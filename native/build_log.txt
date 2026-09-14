@@ -1,0 +1,20 @@
+booster_hook.cpp
+dllmain.cpp
+正在生成代码...
+正在编译...
+buffer.c
+hook.c
+trampoline.c
+hde32.c
+hde64.c
+正在生成代码...
+[OK] hook32.dll
+booster_hook.cpp
+dllmain.cpp
+正在生成代码...
+正在编译...
+buffer.c
+hook.c
+trampoline.c
+hde32.c
+hde64.c

@@ -28,7 +28,7 @@ export default {
 <template>
   <div class="page">
     <div class="page-title">
-      <h2>📊 数据统计</h2>
+      <h2>数据统计</h2>
       <p>索引库分析与系统运行状态</p>
     </div>
 
@@ -88,7 +88,7 @@ export default {
 
       <!-- 网盘分布 -->
       <div class="result-section" v-if="stats.analyzer?.disk_distribution">
-        <h3>💾 网盘分布</h3>
+        <h3>网盘分布</h3>
         <div class="stat-row" v-for="item in stats.analyzer.disk_distribution" :key="item.type">
           <span>{{ getDiskLabel(item.type) || item.type }}</span>
           <span>
@@ -102,7 +102,7 @@ export default {
 
       <!-- 来源分布 -->
       <div class="result-section" v-if="stats.analyzer?.source_distribution">
-        <h3>📡 数据来源分布</h3>
+        <h3>数据来源分布</h3>
         <div class="stat-row" v-for="item in stats.analyzer.source_distribution" :key="item.source_group">
           <span>{{ item.source_group }}</span>
           <span><strong>{{ item.count }}</strong> 条</span>
@@ -111,7 +111,7 @@ export default {
 
       <!-- 搜索热词 -->
       <div class="result-section" v-if="stats.index?.hot_keywords?.length">
-        <h3>🔥 热搜资源</h3>
+        <h3>热搜资源</h3>
         <div class="stat-row" v-for="item in stats.index.hot_keywords.slice(0, 15)" :key="item.title">
           <span>{{ item.title }}</span>
           <span>{{ item.count }} 次搜索</span>

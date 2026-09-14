@@ -1,0 +1,6 @@
+# pid=114220 bits=32 freq=10000000
+t=0 realMs=1006.0 virtMs=1005.3 ratio=0.999
+t=1 realMs=1010.0 virtMs=2597.1 ratio=2.571
+t=2 realMs=1005.0 virtMs=5027.8 ratio=5.003
+t=3 realMs=1012.0 virtMs=5056.3 ratio=4.996
+t=4 realMs=1006.0 virtMs=-8648.3 ratio=-8.597

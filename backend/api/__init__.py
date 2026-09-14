@@ -11,14 +11,20 @@ DuPanSou-Archive API 路由
 PanSou Search API（来自 Go 后端）是搜索引擎基础设施，本 API 是上层应用。
 """
 import logging
+import os
 import re
 import time
 import queue
 import threading
+
+import requests
 from concurrent.futures import ThreadPoolExecutor
 from flask import Blueprint, request, jsonify, redirect, Response
 from datetime import datetime
 from config import Config
+from access import is_station     # 站长判定（与 accel 蓝图共用一份实现）
+from imgcache import UnsafeURL   # noqa: F401  (异常类型供上层判断)
+import imgcache
 from search_engine.xuebapan import xuebapan_client as _xuebapan
 from search_engine.spell import suggest_correction as _suggest_correction
 
@@ -1122,7 +1128,13 @@ def register_routes(app, searcher, index_db, checker, analyzer,
 
     @api_bp.route("/history", methods=["GET"])
     def get_history():
-        """搜索历史列表（默认最近 20 条）"""
+        """搜索历史列表（默认最近 20 条）——**仅站长**。
+
+        历史表是全站一份的聚合数据（keyword 为主键），不是"某个访客的历史"；
+        前端已经把"我的历史"改成浏览器本地存储，这里只留给站长做播种/查看。
+        """
+        if not is_station(request):
+            return jsonify({"error": "无权访问该功能"}), 403
         try:
             limit = min(100, max(1, int(request.args.get("limit", "20"))))
         except (TypeError, ValueError):
@@ -1131,7 +1143,12 @@ def register_routes(app, searcher, index_db, checker, analyzer,
 
     @api_bp.route("/history", methods=["DELETE"])
     def delete_history():
-        """删除搜索历史：?kw=xxx 删单条，不传 kw 清空全部"""
+        """删除搜索历史：?kw=xxx 删单条，不传 kw 清空全部——**仅站长**。
+
+        这条以前是**完全无鉴权**的：任何人一条请求就能清空全站搜索历史。
+        """
+        if not is_station(request):
+            return jsonify({"error": "无权访问该功能"}), 403
         kw = request.args.get("kw", "").strip()
         try:
             deleted = index_db.delete_history(kw or None)
@@ -1341,6 +1358,116 @@ def register_routes(app, searcher, index_db, checker, analyzer,
         except Exception as e:
             return jsonify({"hot": [], "total": 0, "error": str(e)})
 
+    # ---------- 项目仓库信息（左下角 GitHub 入口的星标数） ----------
+    _repo_cache = {"t": 0.0, "data": None}
+    _repo_lock = threading.Lock()
+    GITHUB_REPO = os.getenv("GITHUB_REPO", "akai-do/supansou")
+    REPO_TTL = int(os.getenv("GITHUB_REPO_TTL", "21600"))   # 6 小时：星标变化很慢
+
+    def _parse_stars(msg):
+        """把 shields 的 message 解析成整数：'123' / '9.3k' / '1.2M' → int。"""
+        s = (msg or "").strip().lower().replace(",", "")
+        mult = 1
+        if s.endswith("k"):
+            mult, s = 1000, s[:-1]
+        elif s.endswith("m"):
+            mult, s = 1000000, s[:-1]
+        try:
+            return int(float(s) * mult)
+        except ValueError:
+            return None
+
+    @api_bp.route("/repo", methods=["GET"])
+    def repo_info():
+        """返回项目仓库的星标数（给左下角 GitHub 入口显示）。
+
+        数据源优先 **shields.io**：GitHub 未认证 API 的限流是"每 IP 每小时 60 次"
+        且被同一出口的所有使用者共享（实测本机出口已打到 `x-ratelimit-remaining = 0`），
+        直连经常拿不到；shields 用自己的配额，是这类需求的通行做法。GitHub API 仅兜底。
+        服务端缓存 6 小时、所有人共享一份；取不到就返回 stars=null，
+        前端照常显示入口、只是不显示星标数字。
+        """
+        now = time.time()
+        with _repo_lock:
+            c = _repo_cache["data"]
+            if c and now - _repo_cache["t"] < REPO_TTL:
+                return jsonify({**c, "cached": True})
+
+        data = None
+        # ① shields.io
+        try:
+            r = requests.get(f"https://img.shields.io/github/stars/{GITHUB_REPO}.json",
+                             timeout=8, headers={"User-Agent": "DuPanSou-Archive"})
+            if r.status_code == 200:
+                txt = str(r.json().get("message") or "").strip()
+                if txt:
+                    data = {
+                        "repo": GITHUB_REPO,
+                        "url": f"https://github.com/{GITHUB_REPO}",
+                        "stars": _parse_stars(txt),
+                        "stars_text": txt,
+                        "source": "shields",
+                        "fetched_at": int(now),
+                    }
+        except Exception as e:
+            logger.info("[repo] shields 取星标失败：%s", e)
+
+        # ② GitHub API 兜底（可能被限流）
+        if not data or data.get("stars") is None:
+            try:
+                r = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}",
+                                 timeout=8, headers={
+                                     "User-Agent": "DuPanSou-Archive",
+                                     "Accept": "application/vnd.github+json"})
+                if r.status_code == 200:
+                    j = r.json()
+                    n = int(j.get("stargazers_count") or 0)
+                    data = {
+                        "repo": GITHUB_REPO,
+                        "url": j.get("html_url") or f"https://github.com/{GITHUB_REPO}",
+                        "stars": n,
+                        "stars_text": str(n),
+                        "forks": int(j.get("forks_count") or 0),
+                        "source": "github-api",
+                        "fetched_at": int(now),
+                    }
+            except Exception as e:
+                logger.info("[repo] GitHub API 取星标失败：%s", e)
+
+        with _repo_lock:
+            if data:
+                _repo_cache["t"], _repo_cache["data"] = now, data
+            stale = _repo_cache["data"]
+        if data:
+            return jsonify({**data, "cached": False})
+        if stale:      # 拿不到新的就回上一次的，别让前端闪
+            return jsonify({**stale, "cached": True, "stale": True})
+        return jsonify({"repo": GITHUB_REPO, "stars": None, "stars_text": None,
+                        "url": f"https://github.com/{GITHUB_REPO}"})
+
+    # ---------- 「本机加速器」安装包下发 ----------
+    # 加速必须在客户端所在机器上执行（限速计时器在百度客户端进程里，网页无法从外部
+    # 注入），所以站点只能引导用户下载这个本机小程序。包放在持久化的 data 目录，
+    # 站长把打好的 zip 传上去即可（默认文件名见下，可用 ACCEL_AGENT_ZIP 改）。
+    ACCEL_AGENT_ZIP = os.getenv("ACCEL_AGENT_ZIP", os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "data", "DuPanSou加速器.zip"))
+
+    @api_bp.route("/agent", methods=["GET"])
+    def download_agent():
+        """下载「本机加速器」压缩包（约 13MB，无需装 Python）。"""
+        path = os.path.abspath(ACCEL_AGENT_ZIP)
+        if not os.path.isfile(path):
+            logger.info("[agent] 安装包不存在：%s", path)
+            return jsonify({
+                "error": "本机加速器安装包尚未上传（站长请把 zip 放到 data/ 目录）",
+                "expected_path": path,
+            }), 404
+        from flask import send_file
+        # conditional=True：支持 Range/断点续传（13MB 的包，弱网下能续）
+        return send_file(path, as_attachment=True,
+                         download_name="DuPanSou加速器.zip",
+                         mimetype="application/zip", conditional=True)
+
     @api_bp.route("/douban/hot", methods=["GET"])
     def douban_hot():
         """
@@ -1427,27 +1554,54 @@ def register_routes(app, searcher, index_db, checker, analyzer,
 
     @api_bp.route("/poster/img", methods=["GET"])
     def poster_img():
-        """豆瓣图床代理：/api/poster/img?u=<doubanio URL>，规避 Referer 防盗链"""
+        """图片代理：/api/poster/img?u=<图片 URL>
+
+        两条路互为兜底，顺序按域名选：
+          * **豆瓣图床**先走 DoubanClient.proxy_image —— 它靠轮换 img1-9 子域绕过
+            豆瓣的 JS 挑战（实测直接抓 img1 会返回 418）；
+          * **其它域名**（Telegram CDN 等）先走 imgcache —— 服务端回源 + 磁盘缓存，
+            部署在香港的服务器能抓到国内直连不通的 TG 图，抓一次之后所有人秒出。
+        安全：imgcache 做 SSRF 校验（每一跳都验、只允许公网地址）+ 体积/跳转上限 + 按 IP 限流。
+        """
+        from urllib.parse import urlparse
         u = request.args.get("u", "").strip()
-        try:
-            r = douban_client.proxy_image(u)
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
-        except Exception as e:
-            return jsonify({"error": f"拉取失败: {e}"}), 502
 
-        def _stream():
+        ip = request.remote_addr or "?"
+        if not imgcache.LIMITER.allow(ip):
+            return jsonify({"error": "图片请求过于频繁，请稍后再试"}), 429
+
+        host = (urlparse(u).netloc or "").lower()
+        douban_like = host == "doubanio.com" or host.endswith(".doubanio.com")
+        order = ("douban", "cache") if douban_like else ("cache", "douban")
+
+        def _stream(resp_obj):
+            def gen():
+                try:
+                    for chunk in resp_obj.iter_content(8192):
+                        if chunk:
+                            yield chunk
+                finally:
+                    resp_obj.close()
+            r = Response(gen(),
+                         content_type=resp_obj.headers.get("Content-Type", "image/jpeg"))
+            r.headers["Cache-Control"] = "public, max-age=604800"
+            return r
+
+        errors = []
+        for src in order:
             try:
-                for chunk in r.iter_content(8192):
-                    if chunk:
-                        yield chunk
-            finally:
-                r.close()
-
-        resp = Response(_stream(),
-                        content_type=r.headers.get("Content-Type", "image/jpeg"))
-        resp.headers["Cache-Control"] = "public, max-age=604800"
-        return resp
+                if src == "douban":
+                    return _stream(douban_client.proxy_image(u))
+                body, ct = imgcache.fetch(u)
+                resp = Response(body, content_type=ct)
+                resp.headers["Cache-Control"] = "public, max-age=604800"
+                return resp
+            except imgcache.UnsafeURL as e:
+                # URL 本身不合法：换另一条路也没用，直接拒绝
+                return jsonify({"error": f"该图片地址不被允许：{e}"}), 400
+            except Exception as e:
+                errors.append(f"{src}: {e}")
+        return jsonify({"error": "拉取失败：" + "；".join(errors)}), 502
 
     @api_bp.route("/check/run", methods=["POST"])
     def run_check():

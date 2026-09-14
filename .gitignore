@@ -11,6 +11,13 @@ backend/.venv/
 backend/data/
 *.log
 
+# 网盘加速模块：aria2 二进制与下载产物
+tools/
+downloads/
+
+# 本机加速器打包产物（十几 MB，作为 Release 附件分发，不入库）
+dist_accel/
+
 # Node
 node_modules/
 
@@ -27,3 +34,11 @@ Thumbs.db
 # Env
 .env
 *.env.local
+
+## 项目计划不透露（注意：实际目录名是中文，只写英文名不会生效，两个都留着）
+Project planning/
+
+项目计划/
+
+
+

@@ -142,10 +142,43 @@ douban_client = DoubanClient()
 def create_app():
     app = Flask(__name__, static_folder=None)
 
+    # ⚠ 反向代理下必须修正客户端 IP：nginx 反代时 request.remote_addr 会变成
+    # 127.0.0.1，而访客判定（access.is_station）把 loopback 当站长 —— 不修的话
+    # **所有公网访客都会被当成站长**，解析口令与每 IP 配额统统失效。
+    # x_for=1 只信任 nginx 追加的那一段（werkzeug 取最右侧）。
+    #
+    # 但"信任 XFF"本身有前提：**只有请求确实来自我们自己的基础设施时才可信**。
+    # 所以先用一层极薄中间件把**未修正前的直连方**记到 dps.raw_peer，
+    # 由 access.is_station 判断：直连方是内网/回环 → 采用 XFF 还原的客户端 IP；
+    # 直连方是公网（说明有人绕过 nginx 直连后端）→ 一律不认转发头。
+    if os.getenv("TRUST_PROXY", "1") == "1":
+        from werkzeug.middleware.proxy_fix import ProxyFix
+
+        class _RawPeer:
+            """记下 ProxyFix 改写之前的直连方地址。"""
+
+            def __init__(self, app_):
+                self.app = app_
+
+            def __call__(self, environ, start_response):
+                environ["dps.raw_peer"] = environ.get("REMOTE_ADDR", "")
+                return self.app(environ, start_response)
+
+        app.wsgi_app = _RawPeer(ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1))
+
     # 注册 API 路由
     from api import register_routes
     register_routes(app, searcher, index_db, checker, analyzer,
                     pansou_client, douban_client)
+
+    # 跨域支持：让 https://xiaowusu.com 上的提速页能请求**本机**后端
+    # （加速只能在本机执行，云端页面需要反向调用 127.0.0.1，属于跨域）
+    from cors import register_cors
+    register_cors(app)
+
+    # 注册网盘加速模块（独立蓝图 /api/accel：BDUSS + 解析 + aria2 下载）
+    from accel import register_accel
+    register_accel(app)
 
     # 前端静态文件服务
     frontend_dist = os.path.abspath(os.path.join(
@@ -158,7 +191,11 @@ def create_app():
         def serve_frontend(path):
             if path and os.path.isfile(os.path.join(frontend_dist, path)):
                 return send_from_directory(frontend_dist, path)
-            return send_from_directory(frontend_dist, "index.html")
+            # index.html 强制不缓存：前端资源带 hash 文件名可长缓存，
+            # 但入口页必须每次拿最新，否则发版后浏览器残留旧 JS 引发诡异问题
+            resp = send_from_directory(frontend_dist, "index.html")
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            return resp
     else:
         # 降级页：仓库自带 dist，正常克隆不会走到这里；
         # 只有自行删除/重建 dist 失败时才出现，给出明确指引而非白屏
@@ -205,12 +242,15 @@ if __name__ == "__main__":
     else:
         logger.info(f"✅ PanSou 服务在线")
 
-    # 启动收割器（后台线程）
-    harvester = searcher.setup_harvester()
-    harvester.start()
-
-    # 启动巡检器（后台线程）
-    checker.start()
+    # 启动收割器 / 巡检器（后台线程）
+    # ACCEL_NO_BACKGROUND=1 时全部不启动 —— 给"只当下载提速器用"的分发包，
+    # 避免在别人机器上白跑采集与巡检（占带宽、写索引库）。
+    if os.getenv("ACCEL_NO_BACKGROUND") == "1":
+        logger.info("  [后台任务] 已按 ACCEL_NO_BACKGROUND=1 关闭采集与巡检")
+    else:
+        harvester = searcher.setup_harvester()
+        harvester.start()
+        checker.start()
 
     # 打印初始索引统计
     stats = index_db.get_stats()

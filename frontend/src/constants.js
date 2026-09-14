@@ -2,6 +2,21 @@
 
 export const API = '/api'
 
+// 项目仓库地址：只在这里维护一份（此前硬编码在 AppShell.vue 里且指向了 404 的旧地址）
+export const REPO_URL = 'https://github.com/akai-do/supansou'
+
+// 仓库链接在侧边栏折叠态显示的文字（折叠态只留图标，靠 title 提示）
+export const REPO_LABEL = 'GitHub'
+
+// 「本机加速器」的下载与说明地址。
+// 加速必须在客户端所在的那台机器上执行（限速计时器在百度客户端进程里，
+// 网页无法从外部注入），所以云端站点只能引导用户下载这个本机小程序。
+// 主下载走**本站**（后端 /api/agent 下发 data/ 目录里的 zip，无需额外配置）；
+// 备用镜像指向 GitHub Releases（把 zip 作为 Release 附件上传后即可用）。
+export const ACCEL_DOWNLOAD_URL = '/api/agent'
+export const ACCEL_DOWNLOAD_MIRROR = 'https://github.com/akai-do/supansou/releases/latest'
+export const ACCEL_GUIDE_URL = 'https://github.com/akai-do/supansou#readme'
+
 export const DISK_LABELS = {
   baidu: '百度', quark: '夸克', aliyun: '阿里', xunlei: '迅雷',
   '115': '115', tianyi: '天翼', uc: 'UC', pikpak: 'PikPak',
