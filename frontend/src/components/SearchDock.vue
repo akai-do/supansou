@@ -7,6 +7,14 @@ export default {
   data() {
     return { kw: this.initial || '' }
   },
+  watch: {
+    // 路由变化（热搜/历史/首页搜索/前进后退）时同步输入框。
+    // 只在父级 initial 真正变化时覆盖，不干扰用户正在输入的内容。
+    initial(value) {
+      const next = value || ''
+      if (next !== this.kw) this.kw = next
+    },
+  },
   methods: {
     submit() {
       const kw = this.kw.trim()

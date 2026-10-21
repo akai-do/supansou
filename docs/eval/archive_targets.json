@@ -1,0 +1,403 @@
+{
+  "generated_at": "2026-10-20T00:35:11",
+  "mode": "archive",
+  "base_url": "http://127.0.0.1:5000",
+  "force": false,
+  "skip_stats": true,
+  "summary": {
+    "queries": 5,
+    "queries_with_results": 3,
+    "n_cards": 21,
+    "related_rate": 1.0,
+    "exact_dup": 0.0,
+    "loose_dup": 0.0,
+    "dead_rate": 0.0,
+    "source_diversity": 0.6333,
+    "top_source_share": 0.7,
+    "exact_title_rate": 1.0
+  },
+  "by_category": {
+    "study": {
+      "queries": 1,
+      "related_rate": 1.0,
+      "exact_dup": 0.0,
+      "loose_dup": 0.0,
+      "dead_rate": 0.0,
+      "source_diversity": 1.0,
+      "top_source_share": 1.0,
+      "exact_title_rate": 1.0
+    },
+    "short": {
+      "queries": 1,
+      "related_rate": 1.0,
+      "exact_dup": 0.0,
+      "loose_dup": 0.0,
+      "dead_rate": 0.0,
+      "source_diversity": 0.6,
+      "top_source_share": 0.3,
+      "exact_title_rate": 1.0
+    },
+    "movie": {
+      "queries": 1,
+      "related_rate": 1.0,
+      "exact_dup": 0.0,
+      "loose_dup": 0.0,
+      "dead_rate": 0.0,
+      "source_diversity": 0.3,
+      "top_source_share": 0.8,
+      "exact_title_rate": 1.0
+    }
+  },
+  "results": [
+    {
+      "query": "高等数学教材",
+      "category": "study",
+      "total": 1,
+      "raw_count": 16,
+      "label_source": "auto",
+      "metrics": {
+        "n": 1,
+        "related_rate": 1.0,
+        "exact_dup": 0,
+        "loose_dup": 0,
+        "dead_cards": 0,
+        "dead_rate": 0.0,
+        "source_diversity": 1.0,
+        "top_source_share": 1.0,
+        "exact_title_rate": 1.0
+      },
+      "cards": [
+        {
+          "rank": 1,
+          "title": "【数学书籍】高等数学教材合集",
+          "source": "yunso",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 15,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        }
+      ]
+    },
+    {
+      "query": "2026考研英语一真题解析",
+      "category": "longtail",
+      "total": 0,
+      "raw_count": 0,
+      "label_source": "manual",
+      "metrics": {
+        "n": 0,
+        "related_rate": null,
+        "exact_dup": 0,
+        "loose_dup": 0,
+        "dead_cards": 0,
+        "dead_rate": null,
+        "source_diversity": null,
+        "top_source_share": null,
+        "exact_title_rate": null
+      },
+      "cards": []
+    },
+    {
+      "query": "肖申克的救赎4K REMUX国语",
+      "category": "longtail",
+      "total": 0,
+      "raw_count": 0,
+      "label_source": "manual",
+      "metrics": {
+        "n": 0,
+        "related_rate": null,
+        "exact_dup": 0,
+        "loose_dup": 0,
+        "dead_cards": 0,
+        "dead_rate": null,
+        "source_diversity": null,
+        "top_source_share": null,
+        "exact_title_rate": null
+      },
+      "cards": []
+    },
+    {
+      "query": "活着",
+      "category": "short",
+      "total": 16,
+      "raw_count": 46,
+      "label_source": "auto",
+      "metrics": {
+        "n": 10,
+        "related_rate": 1.0,
+        "exact_dup": 0,
+        "loose_dup": 0,
+        "dead_cards": 0,
+        "dead_rate": 0.0,
+        "source_diversity": 0.6,
+        "top_source_share": 0.3,
+        "exact_title_rate": 1.0
+      },
+      "cards": [
+        {
+          "rank": 1,
+          "title": "【活着】",
+          "source": "xiaokupan",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 12,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 2,
+          "title": "《活着不是为了守规矩》",
+          "source": "xiaokupan",
+          "disk_type": "baidu",
+          "validity": "ok",
+          "variant_count": 2,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 3,
+          "title": "活着 (1994)",
+          "source": "ikantv",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 10,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 4,
+          "title": "活着 - 余华",
+          "source": "yingso",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 5,
+          "title": "活着(日剧)",
+          "source": "huban",
+          "disk_type": "aliyun",
+          "validity": "ok",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 6,
+          "title": "活着回来的男人：一个普通日本兵的二战及战后生命史 (理想国译丛).mobi",
+          "source": "ikantv",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 7,
+          "title": "活着 1994 9.3分 张艺谋/葛优",
+          "source": "yingso",
+          "disk_type": "quark",
+          "validity": "suspect",
+          "variant_count": 2,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 8,
+          "title": "活着-To.Live.1994.CHINESE.1080p.BluRay.H264.AAC-…",
+          "source": "clxiong",
+          "disk_type": "magnet",
+          "validity": "-",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 9,
+          "title": "活着为了证明 Paragraph 175",
+          "source": "gaoqing888",
+          "disk_type": "magnet",
+          "validity": "-",
+          "variant_count": 3,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 10,
+          "title": "《活着，便是希望》（校对版全本）作者：唱歌的傻瓜.txt",
+          "source": "yingso",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        }
+      ]
+    },
+    {
+      "query": "狂飙",
+      "category": "movie",
+      "total": 29,
+      "raw_count": 35,
+      "label_source": "auto",
+      "metrics": {
+        "n": 10,
+        "related_rate": 1.0,
+        "exact_dup": 0,
+        "loose_dup": 0,
+        "dead_cards": 0,
+        "dead_rate": 0.0,
+        "source_diversity": 0.3,
+        "top_source_share": 0.8,
+        "exact_title_rate": 1.0
+      },
+      "cards": [
+        {
+          "rank": 1,
+          "title": "狂飙 (39集) 张译&张颂文&李一桐 | 国产剧",
+          "source": "plugin:xiaokupan",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 2,
+          "title": "狂飙的极品大嫂|https://pan.quark.cn/s/ff5bf8be6f88",
+          "source": "plugin:xiaokupan",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 3,
+          "title": "狂飙风云（100集）（狂飙崛起）|https://pan.quark.cn/s/9f7ec2…",
+          "source": "plugin:xiaokupan",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 4,
+          "title": "狂飙车神（85集）|https://pan.quark.cn/s/c3db6a6943ee",
+          "source": "plugin:xiaokupan",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 5,
+          "title": "狂飙小地主（80集）|https://pan.quark.cn/s/efb27aed99aa",
+          "source": "plugin:xiaokupan",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 6,
+          "title": "狂飙快递员（80集）|https://pan.quark.cn/s/2fb4d2eb9662",
+          "source": "plugin:xiaokupan",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 7,
+          "title": "狂飙弃少（101集)|https://pan.quark.cn/s/624267b95d1e",
+          "source": "plugin:xiaokupan",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 8,
+          "title": "🗄 狂飙(2023)【39集全】【4K.SDR】【内嵌简中】【剧情/犯罪】【张译/张颂文】",
+          "source": "plugin:xiaokupan",
+          "disk_type": "quark",
+          "validity": "suspect",
+          "variant_count": 3,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 9,
+          "title": "狂飙之浴血玫瑰（69集）龚若兰＆李乐天＆聂杨＆周梓言|短剧",
+          "source": "plugin:meitizy",
+          "disk_type": "quark",
+          "validity": "ok",
+          "variant_count": 1,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        },
+        {
+          "rank": 10,
+          "title": "狂飙无人区之狼 (60集) AI短剧 | 短剧",
+          "source": "tg:yoyokuakeduanju",
+          "disk_type": "quark",
+          "validity": "-",
+          "variant_count": 0,
+          "label": 1,
+          "auto_label": 1,
+          "dup_exact": false,
+          "dup_loose": false
+        }
+      ]
+    }
+  ]
+}

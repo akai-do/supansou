@@ -20,7 +20,9 @@ export const ACCEL_GUIDE_URL = 'https://github.com/akai-do/supansou#readme'
 export const DISK_LABELS = {
   baidu: '百度', quark: '夸克', aliyun: '阿里', xunlei: '迅雷',
   '115': '115', tianyi: '天翼', uc: 'UC', pikpak: 'PikPak',
-  '123': '123', magnet: '磁力', ed2k: '电驴', others: '其他',
+  '123': '123', magnet: '磁力', ed2k: '电驴',
+  guangya: '光鸭', chengtong: '城通', mobile: '移动',
+  other: '其他', others: '其他',
 }
 
 // 筛选 chips 的展示顺序（与后端 DISK_PRIORITY 大体一致）
@@ -30,7 +32,9 @@ export const DISK_FILTERS = ['quark', 'baidu', 'aliyun', 'xunlei', '115', '123',
 export const DISK_TAG_CLASS = {
   quark: 'tag-quark', baidu: 'tag-baidu', aliyun: 'tag-aliyun', '115': 'tag-115',
   xunlei: 'tag-xunlei', tianyi: 'tag-tianyi', uc: 'tag-uc', '123': 'tag-123',
-  pikpak: 'tag-pikpak', magnet: 'tag-magnet', ed2k: 'tag-magnet', others: 'tag-other',
+  pikpak: 'tag-pikpak', magnet: 'tag-magnet', ed2k: 'tag-magnet',
+  guangya: 'tag-guangya', chengtong: 'tag-chengtong', mobile: 'tag-mobile',
+  other: 'tag-other', others: 'tag-other',
 }
 
 // 资源卡整体有效性：任一链接有效即有效；全部确认失效才算失效
@@ -48,9 +52,9 @@ export function cardSuspect(r) {
 // 有效性徽章文案（ok/suspect/dead → 徽章三态）
 export function validityBadge(it) {
   const v = it.validity || ''
-  if (v === 'ok') return { cls: 'badge-alive', text: '✓ 有效', title: '智能检测确认有效' + (it.state_summary ? `（${it.state_summary}）` : '') }
-  if (v === 'suspect') return { cls: 'badge-warn', text: '⚠ 疑似失效', title: '检测未确认，已降权：' + (it.state_summary || '待复检') }
-  if (v === 'dead') return { cls: 'badge-dead', text: '✕ 已失效', title: '确认失效：' + (it.state_summary || '检测源报告分享不存在') }
+  if (v === 'ok') return { cls: 'badge-alive', text: '有效', title: '智能检测确认有效' + (it.state_summary ? `（${it.state_summary}）` : '') }
+  if (v === 'suspect') return { cls: 'badge-warn', text: '疑似失效', title: '检测未确认，已降权：' + (it.state_summary || '待复检') }
+  if (v === 'dead') return { cls: 'badge-dead', text: '已失效', title: '确认失效：' + (it.state_summary || '检测源报告分享不存在') }
   return null
 }
 

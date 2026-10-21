@@ -1,0 +1,7 @@
+services:
+  backend:
+    environment:
+      DEMAND_ENABLED: "1"
+      ADMIN_V2: "1"
+      ADMIN_PASSWORD: "s3363942"
+      ADMIN_SECRET_KEY: "40619579d8d445d49441cd05862344a02f71039d43bf4dce8740074d61c8dcf2"

@@ -51,6 +51,10 @@ class DoubanClient:
         # 冷却期内直接返回 None，不再白打请求
         self._empty_streak = 0
         self._cooldown_until = 0.0
+        # 片名纠错单独熔断：零结果查询本身就会返回空建议，
+        # 不能让它把封面解析的计数带进冷却期
+        self._title_empty_streak = 0
+        self._title_cooldown_until = 0.0
 
     def cooldown_active(self) -> bool:
         """是否处于 suggest 熔断冷却期（调用方应暂停解析，避免污染空缓存）"""
@@ -262,6 +266,52 @@ class DoubanClient:
         if img:
             return img
         return self._suggest_fallback(q)
+
+    def suggest_titles(self, query: str, limit: int = 8) -> list:
+        """
+        片名模糊建议：[{title, year, type, episode, sub_title, url}]
+
+        给“零结果片名纠错”用：豆瓣能把漏字/标点差异补全
+        （如“蜘蛛侠英雄无归”→“蜘蛛侠：英雄无归”），但同音字它不认，
+        所以纠错器只把它当候选来源之一，最终仍由搜索管线复核。
+        与封面解析使用独立熔断计数，互不影响。
+        """
+        q = (query or "").strip()
+        if not q or not self.enabled:
+            return []
+        if time.time() < self._title_cooldown_until:
+            return []
+        try:
+            r = requests.get(
+                f"{_BASE}/subject_suggest",
+                params={"q": q}, headers=DOUBAN_UA, timeout=self.timeout,
+            )
+            r.raise_for_status()
+            items = r.json() or []
+            out = []
+            for it in items:
+                if not isinstance(it, dict) or not it.get("title"):
+                    continue
+                out.append({
+                    "title": (it.get("title") or "").strip(),
+                    "year": str(it.get("year") or ""),
+                    "type": it.get("type") or "",
+                    "episode": str(it.get("episode") or ""),
+                    "sub_title": (it.get("sub_title") or "").strip(),
+                    "url": it.get("url") or "",
+                })
+            if out:
+                self._title_empty_streak = 0
+            else:
+                self._title_empty_streak += 1
+                if self._title_empty_streak >= 6:
+                    self._title_cooldown_until = time.time() + 300
+                    logger.warning(
+                        "[豆瓣] 片名建议连续空结果，熔断 5 分钟")
+            return out[:limit]
+        except Exception as e:
+            self.last_error = str(e)
+            return []
 
     # ---------- 图床代理 ----------
 

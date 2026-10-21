@@ -61,6 +61,24 @@ class Config:
     SMART_CHECK_BACKGROUND_LIMIT = int(os.getenv("SMART_CHECK_BACKGROUND_LIMIT", "12"))
 
     # ==========================================
+    # 来源质量统计（曝光/点击/死链率）
+    # ==========================================
+    # 搜索结果出页时按“来源 + 天 + 关键词”累加曝光；关闭后只保留死链率
+    SOURCE_STATS_ENABLED = os.getenv("SOURCE_STATS_ENABLED", "1") == "1"
+    # 来源质量表缓存秒数（62k 行聚合不便宜，避免每次打开统计页都重算）
+    SOURCE_STATS_CACHE_SECONDS = int(os.getenv("SOURCE_STATS_CACHE_SECONDS", "60"))
+    # 少于该样本量时只显示“样本不足”，不参与排名/建议
+    SOURCE_LOW_SAMPLE_THRESHOLD = int(os.getenv("SOURCE_LOW_SAMPLE_THRESHOLD", "20"))
+    # 来源质量降权：只对 checked>=阈值、死链率>=50%、独家率<20% 的来源生效
+    SOURCE_QUALITY_RANKING = os.getenv("SOURCE_QUALITY_RANKING", "1") == "1"
+    # 第一页单来源最多占几张卡；0 表示不做多样性限制。
+    # 8 张会让一个来源刷满 top10，实测降到 4 更均衡。
+    SOURCE_DIVERSITY_CAP = int(os.getenv("SOURCE_DIVERSITY_CAP", "4"))
+    # 第一页同一标题簇（同资源不同发布帖）最多占几张卡；0 表示关闭。
+    # 标题键保留年份/季集：不同年份/不同季集视为不同资源，不强行拆散。
+    TITLE_CLUSTER_CAP = int(os.getenv("TITLE_CLUSTER_CAP", "3"))
+
+    # ==========================================
     # 搜索配置
     # ==========================================
     DEFAULT_CONCURRENCY = int(os.getenv("DEFAULT_CONCURRENCY", "10"))
@@ -95,3 +113,50 @@ class Config:
     DOUBAN_HOT_TTL_SECONDS = int(os.getenv("DOUBAN_HOT_TTL_SECONDS", "3600"))
     # "无匹配"封面的缓存时长（过期后重试；豆瓣限流期的空结果不会永久粘连）
     POSTER_EMPTY_TTL_HOURS = int(os.getenv("POSTER_EMPTY_TTL_HOURS", "24"))
+
+    # ==========================================
+    # aliso 1:1 改造开关（代码内默认值，部署时可用环境变量逐项覆盖）
+    # ==========================================
+    ALISO_UI = os.getenv("ALISO_UI", "1") == "1"
+    # 流式搜索：本地索引先行下发，实时首批/补充召回渐进推送（前端自动回退经典接口）
+    STREAM_SEARCH = os.getenv("STREAM_SEARCH", "1") == "1"
+    # 流式轮询间隔：实时波次内每隔多久检查线程完成度，链接数增长即推送中间帧
+    STREAM_POLL_SECONDS = float(os.getenv("STREAM_POLL_SECONDS", "0.8"))
+    # 单次流式搜索硬性时长上限（秒），超过按错误帧收尾（纠错重搜也在预算内）
+    STREAM_MAX_SECONDS = int(os.getenv("STREAM_MAX_SECONDS", "90"))
+    DEMAND_ENABLED = os.getenv("DEMAND_ENABLED", "0") == "1"
+    ADMIN_V2 = os.getenv("ADMIN_V2", "0") == "1"
+    SITE_NOTICE_ENABLED = os.getenv("SITE_NOTICE_ENABLED", "1") == "1"
+
+    # 站点公开信息默认值（后续可在 site_settings 表里修改）
+    SITE_NAME = os.getenv("SITE_NAME", "SuPanSou")
+    SITE_SUBTITLE = os.getenv("SITE_SUBTITLE", "网盘资源聚合搜索")
+    SITE_LOGO = os.getenv("SITE_LOGO", "/favicon.svg")
+    SITE_NOTICE_TEXT = os.getenv(
+        "SITE_NOTICE_TEXT",
+        "本站仅提供网盘资源索引与链接有效性检测，不存储任何文件；请勿用于商业用途。",
+    )
+    SITE_NOTICE_VERSION = os.getenv("SITE_NOTICE_VERSION", "2026-10-19")
+
+    # ==========================================
+    # 管理后台（与 ACCEL_TOKEN 完全分离）
+    # ==========================================
+    # 首次启动时用这两个环境变量创建默认管理员；密码只存哈希，不写日志。
+    # ADMIN_PASSWORD 为空时不创建默认账号，登录接口会提示“后台未初始化”。
+    ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+    ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+    # 会话签名密钥；为空时进程启动随机生成（重启后需重新登录）
+    ADMIN_SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "")
+    ADMIN_SESSION_HOURS = int(os.getenv("ADMIN_SESSION_HOURS", "12"))
+    ADMIN_COOKIE_SECURE = os.getenv("ADMIN_COOKIE_SECURE", "0") == "1"
+
+    # ==========================================
+    # 需求板防刷（内存计数，重启清零）
+    # ==========================================
+    DEMAND_SUBMIT_LIMIT = int(os.getenv("DEMAND_SUBMIT_LIMIT", "3"))
+    DEMAND_SUBMIT_WINDOW_MINUTES = int(os.getenv("DEMAND_SUBMIT_WINDOW_MINUTES", "10"))
+    DEMAND_VOTE_LIMIT = int(os.getenv("DEMAND_VOTE_LIMIT", "30"))
+    DEMAND_VOTE_WINDOW_MINUTES = int(os.getenv("DEMAND_VOTE_WINDOW_MINUTES", "1"))
+    DEMAND_COMMENT_LIMIT = int(os.getenv("DEMAND_COMMENT_LIMIT", "8"))
+    DEMAND_COMMENT_WINDOW_MINUTES = int(os.getenv(
+        "DEMAND_COMMENT_WINDOW_MINUTES", "5"))

@@ -82,16 +82,19 @@ export default {
     window.removeEventListener('resize', this.drawCurve)
   },
   methods: {
-    // 提速是把 hook 注入到"客户端所在的这台机器"上，所以**优先连本机后端**：
-    // 在 https://xiaowusu.com/booster 打开时页面来自云端，但浏览器可以反过来
-    // 请求你自己的 127.0.0.1:5000 —— 于是云端页面也能真的驱动本机加速。
-    // 本机后端已开 CORS（含 Chrome 私有网络访问所需的 Allow-Private-Network）。
+    // 提速是把 hook 注入到"客户端所在的这台机器"上，所以**优先连本机加速器**：
+    // 本机加速器监听 127.0.0.1:5001（打包版默认 5000）。
+    // 本机页面（如 Docker 后端在 localhost:5000）本身在 Linux 上无法注入，
+    // 必须找到独立的本机加速器；找不到才退回自己的后端并显示真实原因。
     async probeLocal() {
       if (this.localTried) return this.localBase
       this.localTried = true
       const h = location.hostname
-      if (h === '127.0.0.1' || h === 'localhost') return ''   // 本来就是本机页面
-      for (const b of ['http://127.0.0.1:5000', 'http://localhost:5000']) {
+      const isLocalPage = h === '127.0.0.1' || h === 'localhost'
+      const candidates = isLocalPage
+        ? ['http://127.0.0.1:5001']
+        : ['http://127.0.0.1:5001', 'http://127.0.0.1:5000', 'http://localhost:5000']
+      for (const b of candidates) {
         try {
           const ctl = new AbortController()
           const t = setTimeout(() => ctl.abort(), 2500)
@@ -149,10 +152,19 @@ export default {
         if (this.history.length > 120) this.history.shift()
         this.drawCurve()
       } catch (e) {
-        // 请求失败 ≠ 组件不可用：不能因此断言"DLL 没构建"。
-        // （以前这里直接把 available 置 false，后端没起来时会误报去构建 DLL。）
-        this.available = null
-        this.loadError = (e && e.message) || '无法连接后端'
+        // 403 不是"没权限"，而是本机加速器没在运行（Docker/Linux 后端无法注入）。
+        // 给出可操作提示，不要吓人的"无权访问"。
+        const msg = (e && e.message) || '无法连接后端'
+        if (/403|无权/.test(msg)) {
+          this.available = false
+          this.unavailableReason = '未检测到本机加速服务：请先双击「启动本机加速器.bat」，再刷新本页。'
+          this.loadError = null
+        } else {
+          // 请求失败 ≠ 组件不可用：不能因此断言"DLL 没构建"。
+          // （以前这里直接把 available 置 false，后端没起来时会误报去构建 DLL。）
+          this.available = null
+          this.loadError = msg
+        }
       }
     },
     fmtSize(b) {

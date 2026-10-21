@@ -1,12 +1,13 @@
 <script>
 // 资源搜索页：融合搜索 + 智能有效性检测 + 封面图 + 失效隐藏 + 历史/热搜/纠错
 import ResourceCard from '../components/ResourceCard.vue'
+import ResourceDialog from '../components/ResourceDialog.vue'
 import {
   API, DISK_LABELS, DISK_FILTERS, cardDead, guessDiskType, isPanLink,
 } from '../constants.js'
 
 export default {
-  components: { ResourceCard },
+  components: { ResourceCard, ResourceDialog },
   data() {
     return {
       keyword: '',
@@ -25,7 +26,6 @@ export default {
       searched: false,
       correction: null,
       expanded: {},
-      history: [],
       // 智能有效性检测
       checking: false,
       hideDead: true,
@@ -35,13 +35,15 @@ export default {
       // 网盘筛选 chips（服务端过滤）；DISK_FILTERS 需挂 data 才能在模板使用
       diskType: '',
       DISK_FILTERS,
-      // 封面图
-      showPoster: localStorage.getItem('dps-poster') !== '0',
+      // 封面：默认无封面，勾选后记住偏好（dps-poster='1'）
+      showPoster: localStorage.getItem('dps-poster') === '1',
       posters: {},
       // 热搜词
       hotWords: [],
       // 粘贴链接直检
       linkCheck: null,
+      // 资源交付弹窗（旧 /resource 回滚路径也保留二维码/提取码）
+      dialog: { open: false, card: null, item: null },
       // 轻提示
       toast: '',
       _toastTimer: null,
@@ -102,7 +104,6 @@ export default {
     showPoster(v) { localStorage.setItem('dps-poster', v ? '1' : '0') },
   },
   async mounted() {
-    this.loadHistory()
     this.loadHot()
     const kw = String(this.$route.query.kw || '').trim()
     const link = String(this.$route.query.link || '').trim()
@@ -163,7 +164,6 @@ export default {
       this.results = []
       this.posters = {}
       await this.fetchSearch(this.searchParams(1))
-      this.rememberSearch(kw)          // 历史记在本浏览器（不再写服务器）
     },
     async goPage(p) {
       if (this.loading || p < 1 || p > this.totalPages || p === this.page) return
@@ -187,50 +187,9 @@ export default {
         this.hotWords = (data.hot || []).slice(0, 12)
       } catch (e) { /* 热搜失败不打扰 */ }
     },
-    async loadHistory() {
-      // 搜索历史存**本浏览器**（localStorage）：不同访客互不可见，
-      // 删除/清空也只影响自己。服务端的 /api/history 是全站聚合表且现在仅站长可读，
-      // 这里只在"本地为空 + 站长身份"时播种一次，把历史平滑带过来。
-      this.history = this.readLocalHistory()
-      if (this.history.length) return
-      try {
-        const resp = await fetch(`${API}/history?limit=12`, {
-          headers: this.accelTokenHeaders(),
-        })
-        if (!resp.ok) return          // 访客 403：不需要服务端历史
-        const data = await resp.json()
-        const kw = Array.isArray(data.history) ? data.history : []
-        if (kw.length) {
-          this.history = kw
-          this.writeLocalHistory(kw)
-        }
-      } catch (e) { /* 历史加载失败不阻塞搜索 */ }
-    },
     accelTokenHeaders() {
       const t = localStorage.getItem('dps-accel-token') || ''
       return t ? { 'X-Access-Token': t } : {}
-    },
-    readLocalHistory() {
-      try {
-        const arr = JSON.parse(localStorage.getItem('dps-search-history') || '[]')
-        return Array.isArray(arr) ? arr.filter((x) => x && x.keyword).slice(0, 20) : []
-      } catch (e) {
-        return []
-      }
-    },
-    writeLocalHistory(arr) {
-      try {
-        localStorage.setItem('dps-search-history', JSON.stringify(arr.slice(0, 20)))
-      } catch (e) { /* 隐私模式/配额满：忽略 */ }
-    },
-    // 搜过就记一条（由 doSearch 调用）：去重置顶、上限 20
-    rememberSearch(kw) {
-      const k = (kw || '').trim()
-      if (!k) return
-      const now = new Date().toISOString().slice(0, 19).replace('T', ' ')
-      const rest = this.history.filter((h) => h.keyword !== k)
-      this.history = [{ keyword: k, last_at: now }, ...rest].slice(0, 20)
-      this.writeLocalHistory(this.history)
     },
     searchFrom(kw) {
       this.keyword = kw
@@ -240,14 +199,6 @@ export default {
       if (!this.correction) return
       this.keyword = this.correction.from
       this.doSearch()
-    },
-    async delHistory(kw) {
-      this.history = this.history.filter((h) => h.keyword !== kw)
-      this.writeLocalHistory(this.history)
-    },
-    async clearHistory() {
-      this.history = []
-      this.writeLocalHistory([])
     },
     // ===== 粘贴网盘链接直接检测 =====
     async runLinkCheck(link) {
@@ -400,6 +351,17 @@ export default {
         this.showToast('举报失败: ' + e.message)
       }
     },
+    // ===== 资源弹窗 =====
+    openDialog(payload) {
+      this.dialog = { open: true, card: payload.card, item: payload.item }
+    },
+    closeDialog() {
+      this.dialog = { open: false, card: null, item: null }
+    },
+    onDialogReport(item) {
+      this.reportDead(item)
+      this.closeDialog()
+    },
     // ===== 轻提示 =====
     showToast(msg) {
       this.toast = msg
@@ -416,28 +378,14 @@ export default {
 
 <template>
   <div class="page">
-    <!-- 未搜索：热搜 + 历史 -->
+    <!-- 未搜索：热搜 -->
     <div class="explore" v-if="!searched && !loading">
       <div class="explore-title" v-if="hotWords.length">🔥 热门搜索</div>
       <div class="chips-wrap" v-if="hotWords.length">
         <span class="chip hot" v-for="h in hotWords" :key="h.title"
               :title="`索引命中 ${h.count} 次`" @click="searchFrom(h.title)">{{ h.title }}</span>
       </div>
-      <template v-if="history.length">
-        <div class="explore-title">
-          🕘 搜索历史 <span class="explore-scope">（仅本机可见）</span>
-          <a class="explore-clear" @click="clearHistory">清空</a>
-        </div>
-        <div class="chips-wrap">
-          <span class="chip" v-for="h in history" :key="h.keyword"
-                :title="h.cnt ? `搜过 ${h.cnt} 次` : (h.last_at ? `上次搜索 ${h.last_at}` : '')"
-                @click="searchFrom(h.keyword)">
-            {{ h.keyword }}
-            <a class="chip-x" @click.stop="delHistory(h.keyword)">×</a>
-          </span>
-        </div>
-      </template>
-      <div class="explore-hint" v-if="!hotWords.length && !history.length">
+      <div class="explore-hint" v-if="!hotWords.length">
         输入关键词开始搜索 · 支持电影、剧集、教程、软件、电子书等<br>
         <span>粘贴网盘分享链接可直接检测有效性</span>
       </div>
@@ -455,8 +403,9 @@ export default {
 
     <!-- 纠错 -->
     <div class="correction-bar" v-if="searched && correction">
-      找不到「<b>{{ correction.from }}</b>」，已显示「<b>{{ correction.to }}</b>」的结果
-      <a href="#" class="correction-link" @click.prevent="searchOriginal">改搜原词「{{ correction.from }}」</a>
+      没找到「<b>{{ correction.from }}</b>」，您是不是要找：<b>{{ correction.to }}</b>？
+      <span class="correction-note">已显示该片名的结果</span>
+      <a href="#" class="correction-link" @click.prevent="searchOriginal">仍然搜索原词「{{ correction.from }}」</a>
     </div>
 
     <div class="error-msg" v-if="error">{{ error }}</div>
@@ -522,7 +471,7 @@ export default {
                       :item="r" :show-poster="showPoster"
                       :poster="posters[r.title] || ''"
                       :keyword="keyword.trim()"
-                      @report="reportDead" @toast="showToast" />
+                      @report="reportDead" @toast="showToast" @open="openDialog" />
 
         <!-- 翻页 -->
         <div class="pager" v-if="totalPages > 1 && !loading">
@@ -541,6 +490,10 @@ export default {
         </div>
       </div>
     </div>
+
+    <ResourceDialog :open="dialog.open" :card="dialog.card" :item="dialog.item"
+                    :keyword="keyword" @close="closeDialog" @toast="showToast"
+                    @report="onDialogReport" />
 
     <div class="toast" v-if="toast">{{ toast }}</div>
   </div>
