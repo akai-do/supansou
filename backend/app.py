@@ -20,6 +20,8 @@ import os
 import sys
 import logging
 import mimetypes
+import secrets
+from datetime import timedelta
 from flask import Flask, send_from_directory
 
 # Windows 注册表可能把 .js/.css 映射成 text/plain，导致浏览器以严格 MIME
@@ -142,6 +144,17 @@ douban_client = DoubanClient()
 def create_app():
     app = Flask(__name__, static_folder=None)
 
+    # 后台会话签名密钥：与 ACCEL_TOKEN 分离；未配置时进程内随机生成，
+    # 重启后旧会话失效（需要重新登录），不会把密钥写进日志或数据库。
+    app.secret_key = Config.ADMIN_SECRET_KEY or secrets.token_hex(32)
+    app.config.update(
+        SESSION_COOKIE_NAME="dps_admin",
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=Config.ADMIN_COOKIE_SECURE,
+        PERMANENT_SESSION_LIFETIME=timedelta(hours=Config.ADMIN_SESSION_HOURS),
+    )
+
     # ⚠ 反向代理下必须修正客户端 IP：nginx 反代时 request.remote_addr 会变成
     # 127.0.0.1，而访客判定（access.is_station）把 loopback 当站长 —— 不修的话
     # **所有公网访客都会被当成站长**，解析口令与每 IP 配额统统失效。
@@ -252,18 +265,36 @@ if __name__ == "__main__":
         harvester.start()
         checker.start()
 
-    # 打印初始索引统计
+    # 打印初始索引统计（validity 口径：未检测单独列出）
     stats = index_db.get_stats()
     logger.info(f"  索引库: {stats['total']} 条链接, "
-                f"存活 {stats['alive']}, 失效 {stats['dead']}")
+                f"已检测 {stats['checked']} (死链 {stats['dead']}), "
+                f"未检测 {stats['untested']}")
 
-    # 启动 Flask 服务
-    app.run(
-        host=host,
-        port=Config.PORT,
-        debug=debug,
-        use_reloader=False,  # 关闭自动重载（否则后台线程会重复启动）
-    )
+    # 启动 HTTP 服务
+    # ★ 生产用 waitress：Flask 自带开发服务器每个响应都是 Connection: close，
+    #   连续点筛选/刷新会不断新建短连接，经 Docker 端口转发时偶发连接重置，
+    #   浏览器表现为 "Failed to fetch"。waitress 支持 HTTP/1.1 keep-alive
+    #   和线程池，SSE 也会边产生边下发（不整段缓冲）。
+    if os.getenv("USE_WAITRESS", "1") == "1" and not debug:
+        from waitress import serve
+        threads = int(os.getenv("WAITRESS_THREADS", "64"))
+        logger.info(f"  WSGI: waitress (threads={threads}, keep-alive)")
+        serve(
+            app,
+            host=host,
+            port=Config.PORT,
+            threads=threads,
+            channel_timeout=120,
+            connection_limit=200,
+        )
+    else:
+        app.run(
+            host=host,
+            port=Config.PORT,
+            debug=debug,
+            use_reloader=False,  # 关闭自动重载（否则后台线程会重复启动）
+        )
 
     # 停止后台服务
     harvester.stop()

@@ -8,13 +8,19 @@ indexer —— 历史索引模块（你的核心创新）
 索引库积累到一定量后，搜索时先查本地索引（毫秒级），再查 PanSou（秒级），
 两者融合后返回 —— 实现"老的搜得到，新的也搜得到"。
 """
+import logging
 import os
+import re
 import sqlite3
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
+
 from config import Config
+from source_stats import classify_category, today_str
+
+logger = logging.getLogger("indexer")
 
 
 class IndexDatabase:
@@ -33,6 +39,8 @@ class IndexDatabase:
             self._local.conn.row_factory = sqlite3.Row
             self._local.conn.execute("PRAGMA journal_mode=WAL")
             self._local.conn.execute("PRAGMA cache_size=-8000")
+            # 曝光/点击统计会在搜索线程与请求线程并发写入；等锁而不是立刻报错
+            self._local.conn.execute("PRAGMA busy_timeout=3000")
         return self._local.conn
 
     def _init_db(self):
@@ -42,6 +50,7 @@ class IndexDatabase:
         data_dir = os.path.dirname(os.path.abspath(self.db_path))
         os.makedirs(data_dir, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS link_index (
@@ -62,6 +71,7 @@ class IndexDatabase:
             CREATE INDEX IF NOT EXISTS idx_alive ON link_index(alive);
             CREATE INDEX IF NOT EXISTS idx_last_seen ON link_index(last_seen);
             CREATE INDEX IF NOT EXISTS idx_title ON link_index(title);
+            CREATE INDEX IF NOT EXISTS idx_source ON link_index(source);
 
             CREATE TABLE IF NOT EXISTS search_history (
                 keyword TEXT PRIMARY KEY,
@@ -72,10 +82,25 @@ class IndexDatabase:
             CREATE TABLE IF NOT EXISTS click_stats (
                 url     TEXT NOT NULL,
                 kw      TEXT NOT NULL DEFAULT '',
+                source  TEXT DEFAULT '',
                 cnt     INTEGER DEFAULT 1,
                 last_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (url, kw)
             );
+
+            -- 来源质量：按“天 + 来源 + 关键词”聚合曝光/点击，
+            -- 既支持 7/30 天窗口，也避免为每次展示存一行明细。
+            CREATE TABLE IF NOT EXISTS source_daily_stats (
+                day         TEXT NOT NULL,
+                category    TEXT NOT NULL DEFAULT '',
+                source      TEXT NOT NULL DEFAULT '',
+                kw          TEXT NOT NULL DEFAULT '',
+                impressions INTEGER DEFAULT 0,
+                clicks      INTEGER DEFAULT 0,
+                PRIMARY KEY (day, source, kw)
+            );
+            CREATE INDEX IF NOT EXISTS idx_source_daily_day
+                ON source_daily_stats(day);
 
             CREATE TABLE IF NOT EXISTS zero_result_watch (
                 kw       TEXT PRIMARY KEY,
@@ -97,10 +122,46 @@ class IndexDatabase:
             "ALTER TABLE link_index ADD COLUMN ok_cnt INTEGER DEFAULT 0",
             "ALTER TABLE link_index ADD COLUMN state_summary TEXT DEFAULT ''",
             "ALTER TABLE link_index ADD COLUMN msg_image TEXT DEFAULT ''",
+            "ALTER TABLE link_index ADD COLUMN category TEXT DEFAULT ''",
         ):
             col = ddl.split("ADD COLUMN ")[1].split()[0]
             if col not in cols:
                 conn.execute(ddl)
+
+        # 点击统计补来源列：新点击直接写 source，旧点击留空、查询时回退
+        # 到 link_index 反查（COALESCE），不阻塞升级。
+        click_cols = {r[1] for r in conn.execute("PRAGMA table_info(click_stats)")}
+        if "source" not in click_cols:
+            conn.execute("ALTER TABLE click_stats ADD COLUMN source TEXT DEFAULT ''")
+
+        # 旧版 alive=0 但 validity 为空的行，统一迁到四态里的 dead。
+        # 这样“未检测”只表示真的没有四态结论，不再把旧死链混进未检测。
+        conn.execute(
+            "UPDATE link_index SET validity='dead', "
+            "checked_at=COALESCE(checked_at, last_seen) "
+            "WHERE (validity IS NULL OR validity='') AND alive=0"
+        )
+
+        # 类别回填：老库没有 category 列，首次升级时按标题归类写一遍。
+        # 之后新入库由 store_links 写入，category='' 的行数为 0，不再扫描。
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM link_index "
+            "WHERE category IS NULL OR category = ''"
+        ).fetchone()[0]
+        if pending:
+            cursor = conn.execute(
+                "SELECT id, title FROM link_index "
+                "WHERE category IS NULL OR category = ''"
+            )
+            while True:
+                batch = cursor.fetchmany(5000)
+                if not batch:
+                    break
+                conn.executemany(
+                    "UPDATE link_index SET category = ? WHERE id = ?",
+                    [(classify_category(r["title"]), r["id"]) for r in batch],
+                )
+
         conn.commit()
         conn.close()
 
@@ -149,31 +210,36 @@ class IndexDatabase:
             password = (link.get("password", "") or "").strip()
             disk_type = (link.get("disk_type", "") or "").strip()
             source = (link.get("source", "") or "").strip()
+            category = classify_category(title)
 
             try:
                 msg_image = (link.get("msg_image") or "").strip()
                 conn.execute("""
                     INSERT INTO link_index (url, password, title, disk_type,
-                                            source, first_seen, last_seen, search_cnt, msg_image)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+                                            source, category, first_seen, last_seen,
+                                            search_cnt, msg_image)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                     ON CONFLICT(url) DO UPDATE SET
                         last_seen = ?,
                         search_cnt = search_cnt + 1,
                         title = CASE WHEN ? != '' THEN ? ELSE title END,
                         password = CASE WHEN ? != '' THEN ? ELSE password END,
-                        msg_image = CASE WHEN ? != '' THEN ? ELSE msg_image END
+                        msg_image = CASE WHEN ? != '' THEN ? ELSE msg_image END,
+                        category = CASE WHEN ? != '' THEN ? ELSE category END
                 """, (
                     url,
                     password,
                     title,
                     disk_type,
                     source,
+                    category,
                     now, now,
                     msg_image,
                     now,
                     title, title,
                     password, password,
                     msg_image, msg_image,
+                    category, category,
                 ))
                 count += 1
             except sqlite3.IntegrityError:
@@ -207,6 +273,10 @@ class IndexDatabase:
             return []
 
         tokens = self._tokenize(keyword)
+        # 排序优先级词：短查询用完整关键词；长查询用最具体的 CJK 核心词
+        # （如 2026考研英语一真题解析 → 考研英语），避免“2026”“国语”
+        # 这类泛词把候选池前排占满。
+        priority_token = keyword
 
         # 长查询精准模式：>8 字（长书名/教材名）时不用 CJK 2-3 字滑窗——
         # "python与人工智能编程-基础与实践" 的"基础""实践"窗口会把
@@ -214,7 +284,22 @@ class IndexDatabase:
         if len(keyword) > 8:
             ascii_tokens = [t for t in tokens
                             if all(ord(c) < 128 for c in t) and len(t) >= 4]
-            tokens = [keyword] + [t for t in ascii_tokens if t != keyword]
+            # 长查询的 CJK 段/前 4 字也参与 SQL 召回：
+            # 只认完整关键词会让索引里的“考研英语一、二真题解析”
+            # 无法进入候选池。精确性仍由 API 层 _matches_query 把关。
+            core_tokens = []
+            for seg in re.findall(r"[\u4e00-\u9fff]{2,}", keyword):
+                if seg not in core_tokens:
+                    core_tokens.append(seg)
+                head = seg[:4]
+                if len(head) >= 2 and head not in core_tokens:
+                    core_tokens.append(head)
+            tokens = [keyword] + [
+                t for t in ascii_tokens + core_tokens if t != keyword]
+            # 选最短的 >=4 字核心词当排序优先级（4 字头部最具体）
+            candidates = [t for t in core_tokens if len(t) >= 4]
+            if candidates:
+                priority_token = min(candidates, key=len)
 
         # 组装 WHERE 条件：token 之间 OR。
         # 短 token（<4 字符）只匹配标题——网盘分享码是随机字符串，
@@ -240,9 +325,15 @@ class IndexDatabase:
         if only_alive:
             conditions.append("alive = 1")
 
-        # 完整词命中加分（用于排序）：额外消耗 2 个 ? 参数
-        order_expr = "CASE WHEN title LIKE ? OR url LIKE ? THEN 1 ELSE 0 END DESC"
-        order_params = [f"%{keyword}%", f"%{keyword}%"]
+        # 完整词命中优先；长查询再用核心词（如“考研英语”）优先，
+        # 否则候选池前 80 条会被“2026”“国语”这类泛词占满。
+        order_expr = (
+            "CASE WHEN title LIKE ? OR url LIKE ? THEN 1 ELSE 0 END DESC, "
+            "CASE WHEN title LIKE ? THEN 1 ELSE 0 END DESC"
+        )
+        order_params = [
+            f"%{keyword}%", f"%{keyword}%", f"%{priority_token}%",
+        ]
 
         sql = f"""
             SELECT id, url, password, title, disk_type, source,
@@ -508,25 +599,234 @@ class IndexDatabase:
         self._conn.commit()
         return cur.rowcount
 
+    def admin_list(self, keyword: str = "", disk_type: str = "",
+                   include_dead: bool = True, page: int = 1,
+                   page_size: int = 50) -> dict:
+        """后台资源列表（分页 + 关键词/网盘筛选）。只读。"""
+        try:
+            page = max(1, int(page))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            page_size = min(100, max(1, int(page_size)))
+        except (TypeError, ValueError):
+            page_size = 50
+
+        where, params = [], []
+        keyword = (keyword or "").strip()
+        if keyword:
+            where.append("(title LIKE ? OR url LIKE ?)")
+            params.extend([f"%{keyword}%", f"%{keyword}%"])
+        disk_type = (disk_type or "").strip()
+        if disk_type:
+            where.append("disk_type = ?")
+            params.append(disk_type)
+        if not include_dead:
+            where.append("alive = 1")
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+        conn = self._conn
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM link_index{where_sql}", params
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, url, password, title, disk_type, source, first_seen, "
+            "last_seen, checked_at, alive, validity, state_summary, search_cnt "
+            f"FROM link_index{where_sql} ORDER BY last_seen DESC LIMIT ? OFFSET ?",
+            params + [page_size, (page - 1) * page_size],
+        ).fetchall()
+        return {
+            "items": [dict(r) for r in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+        }
+
+    def admin_delete_urls(self, urls: list) -> int:
+        """后台批量删除索引行（按 URL）。返回删除条数。"""
+        urls = [str(u).strip() for u in (urls or []) if str(u).strip()]
+        if not urls:
+            return 0
+        conn = self._conn
+        deleted = 0
+        for i in range(0, len(urls), 500):
+            chunk = urls[i:i + 500]
+            placeholders = ",".join(["?" for _ in chunk])
+            cur = conn.execute(
+                f"DELETE FROM link_index WHERE url IN ({placeholders})", chunk
+            )
+            deleted += cur.rowcount
+        conn.commit()
+        return deleted
+
+    def get_recent_titles(self, limit: int = 80) -> list:
+        """最近入库的去重资源标题（首页“本地”行数据源）。
+
+        只读查询，不新增表；按 last_seen 倒序取候选，调用方再做降噪。
+        """
+        try:
+            limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            limit = 80
+        rows = self._conn.execute(
+            "SELECT title, MAX(last_seen) AS seen FROM link_index "
+            "WHERE title != '' AND alive = 1 "
+            "GROUP BY title ORDER BY seen DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [r["title"] for r in rows if r["title"]]
+
+    def get_random_titles(self, limit: int = 80) -> list:
+        """随机抽样的资源标题（首页“本地”行数据源）。
+
+        首页不能按 last_seen 取“最近入库”：实时搜索会把结果写进索引，
+        按时间排序等于把最近被搜过的内容摆到公开首页。这里改为随机抽样。
+        """
+        try:
+            limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            limit = 80
+        rows = self._conn.execute(
+            "SELECT title FROM link_index "
+            "WHERE title != '' AND alive = 1 "
+            "ORDER BY RANDOM() LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [r["title"] for r in rows if r["title"]]
+
     # ==========================================
     # 点击统计（热度反哺排序）
     # ==========================================
 
-    def record_click(self, url: str, kw: str = ""):
-        """记录一次结果点击（UPSERT：同一 (url, kw) 累计次数）"""
+    def record_click(self, url: str, kw: str = "", source: str = ""):
+        """
+        记录一次结果点击：
+          * click_stats 保留 (url, kw) 全量计数，供热度和排序使用；
+          * source_daily_stats 按天/来源/关键词累计，供 CTR 与来源质量表使用。
+        source 为空时回退到 link_index 反查（兼容旧前端）。
+        """
         url = (url or "").strip()
         if not url:
             return
         kw = (kw or "").strip().lower()
+        source = (source or "").strip()
+        if not source:
+            try:
+                row = self._conn.execute(
+                    "SELECT source FROM link_index WHERE url = ?", (url,)
+                ).fetchone()
+                source = ((row["source"] if row else "") or "").strip()
+            except sqlite3.Error:
+                source = ""
         now = datetime.now().isoformat()
-        self._conn.execute("""
-            INSERT INTO click_stats (url, kw, cnt, last_at)
-            VALUES (?, ?, 1, ?)
-            ON CONFLICT(url, kw) DO UPDATE SET
-                cnt = cnt + 1,
-                last_at = ?
-        """, (url, kw, now, now))
-        self._conn.commit()
+        day = today_str()
+        category = classify_category(kw)
+        try:
+            self._conn.execute("""
+                INSERT INTO click_stats (url, kw, source, cnt, last_at)
+                VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(url, kw) DO UPDATE SET
+                    cnt = cnt + 1,
+                    last_at = ?,
+                    source = CASE WHEN excluded.source != ''
+                                  THEN excluded.source ELSE source END
+            """, (url, kw, source, now, now))
+            self._conn.execute("""
+                INSERT INTO source_daily_stats
+                    (day, category, source, kw, impressions, clicks)
+                VALUES (?, ?, ?, ?, 0, 1)
+                ON CONFLICT(day, source, kw) DO UPDATE SET
+                    clicks = clicks + 1,
+                    category = CASE WHEN source_daily_stats.category = ''
+                                    THEN excluded.category
+                                    ELSE source_daily_stats.category END
+            """, (day, category, source, kw))
+            self._conn.commit()
+        except sqlite3.Error as e:
+            # 统计失败不能影响点击跳转
+            logger.warning(f"记录点击统计失败: {e}")
+
+    def record_impressions(self, source_counts: dict, kw: str = ""):
+        """
+        记录一次结果页曝光：{source: 卡片数}。
+
+        “按卡片计”而不是按链接计：同一资源卡内的多网盘变体只算一次，
+        来源取主卡 source（没有则取第一个变体）。
+        """
+        if not source_counts:
+            return
+        kw = (kw or "").strip().lower()
+        category = classify_category(kw)
+        day = today_str()
+        rows = []
+        for source, count in (source_counts or {}).items():
+            try:
+                count = int(count)
+            except (TypeError, ValueError):
+                continue
+            if count <= 0:
+                continue
+            rows.append((day, category, (source or "").strip(), kw, count))
+        if not rows:
+            return
+        try:
+            self._conn.executemany("""
+                INSERT INTO source_daily_stats
+                    (day, category, source, kw, impressions, clicks)
+                VALUES (?, ?, ?, ?, ?, 0)
+                ON CONFLICT(day, source, kw) DO UPDATE SET
+                    impressions = impressions + excluded.impressions,
+                    category = CASE WHEN source_daily_stats.category = ''
+                                    THEN excluded.category
+                                    ELSE source_daily_stats.category END
+            """, rows)
+            self._conn.commit()
+        except sqlite3.Error as e:
+            logger.warning(f"记录来源曝光失败: {e}")
+
+    def get_source_daily_stats(self, days: int = 30, category: str = "all") -> dict:
+        """
+        按来源汇总窗口内的曝光/点击。
+
+        days=0 表示全部时间；category='all' 表示不按查询类型过滤。
+        返回 {"by_source": {source: {"impressions", "clicks"}}, "since": 最早日期}
+        """
+        sql = ("SELECT source, SUM(impressions) AS impressions, "
+               "SUM(clicks) AS clicks FROM source_daily_stats WHERE 1=1")
+        params = []
+        if days and days > 0:
+            cutoff = (date.today() - timedelta(days=days - 1)).isoformat()
+            sql += " AND day >= ?"
+            params.append(cutoff)
+        if category and category != "all":
+            sql += " AND category = ?"
+            params.append(category)
+        sql += " GROUP BY source"
+        rows = self._conn.execute(sql, params).fetchall()
+        by_source = {
+            (r["source"] or ""): {
+                "impressions": int(r["impressions"] or 0),
+                "clicks": int(r["clicks"] or 0),
+            }
+            for r in rows
+        }
+        since = self._conn.execute(
+            "SELECT MIN(day) FROM source_daily_stats"
+        ).fetchone()[0]
+        return {"by_source": by_source, "since": since}
+
+    def get_all_time_clicks_by_source(self) -> dict:
+        """全量点击按来源汇总；旧行 source 为空时回退到 link_index。"""
+        rows = self._conn.execute("""
+            SELECT COALESCE(NULLIF(cs.source, ''), li.source, '') AS click_source,
+                   SUM(cs.cnt) AS clicks
+            FROM click_stats cs
+            LEFT JOIN link_index li ON li.url = cs.url
+            GROUP BY click_source
+        """).fetchall()
+        return {(r["click_source"] or ""): int(r["clicks"] or 0) for r in rows}
+
 
     def get_click_stats(self, keyword: str = None) -> dict:
         """
@@ -611,11 +911,34 @@ class IndexDatabase:
         return [dict(r) for r in rows]
 
     def get_stats(self) -> dict:
-        """获取索引库统计"""
+        """
+        获取索引库统计（只认 validity 四态）。
+
+        死链率的分母是“已检测”，不是全库；未检测单独列出，
+        避免把默认 alive=1 的未体检链接算成“健康”。
+        """
         conn = self._conn
-        total = conn.execute("SELECT COUNT(*) FROM link_index").fetchone()[0]
-        alive = conn.execute("SELECT COUNT(*) FROM link_index WHERE alive=1").fetchone()[0]
-        dead = conn.execute("SELECT COUNT(*) FROM link_index WHERE alive=0").fetchone()[0]
+        row = conn.execute("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN validity = 'ok' THEN 1 ELSE 0 END) AS ok,
+                SUM(CASE WHEN validity = 'suspect' THEN 1 ELSE 0 END) AS suspect,
+                SUM(CASE WHEN validity = 'dead' THEN 1 ELSE 0 END) AS dead,
+                SUM(CASE WHEN validity IN ('ok', 'suspect', 'dead')
+                         THEN 1 ELSE 0 END) AS checked,
+                SUM(CASE WHEN validity IS NULL OR validity = ''
+                         THEN 1 ELSE 0 END) AS untested
+            FROM link_index
+        """).fetchone()
+        total = int(row["total"] or 0)
+        ok = int(row["ok"] or 0)
+        suspect = int(row["suspect"] or 0)
+        dead = int(row["dead"] or 0)
+        checked = int(row["checked"] or 0)
+        untested = int(row["untested"] or 0)
+
+        def pct(n, d):
+            return round(n / d * 100, 1) if d else 0.0
 
         # 按网盘类型统计
         type_rows = conn.execute(
@@ -631,8 +954,15 @@ class IndexDatabase:
 
         return {
             "total": total,
-            "alive": alive,
+            "checked": checked,
+            "ok": ok,
+            "suspect": suspect,
             "dead": dead,
+            "untested": untested,
+            "checked_rate": pct(checked, total),
+            "ok_rate": pct(ok, checked),
+            "suspect_rate": pct(suspect, checked),
+            "dead_rate": pct(dead, checked),
             "by_type": by_type,
             "hot_keywords": hot_keywords,
         }

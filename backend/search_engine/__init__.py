@@ -14,6 +14,7 @@ PanSou API 文档：
     {"kw": "关键词", "res": "merge", "src": "all"}
 """
 import requests
+from requests.adapters import HTTPAdapter
 import json
 import time
 import hashlib
@@ -27,6 +28,11 @@ logger = logging.getLogger("search_engine")
 # localhost 请求并在代理忙碌时造成"瞬时连接拒绝"）
 _SESSION = requests.Session()
 _SESSION.trust_env = False
+# 一次搜索会并发扇出多个查询变体；默认 pool_maxsize=10 会让连接被频繁
+# 丢弃（日志 "Connection pool is full"），并发搜索时更容易抖动。
+_ADAPTER = HTTPAdapter(pool_connections=16, pool_maxsize=32)
+_SESSION.mount("http://", _ADAPTER)
+_SESSION.mount("https://", _ADAPTER)
 
 
 class PansouClient:

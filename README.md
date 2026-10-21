@@ -181,6 +181,55 @@ HOST=0.0.0.0 python app.py
 
 ---
 
+## 📊 来源质量统计
+
+统计页 `/stats` 按“来源”展开，所有健康指标统一使用 validity 四态：
+
+- **死链率 = 确认失效 / 已检测**；未检测单独列出，不再把默认 `alive=1` 当健康。
+- 每行显示收录、已检测率、死链率、疑似率、独家率、曝光、点击、CTR、
+  点击占比、每百条点击、7/30 日新增、最近复查、评分与建议。
+- 曝光/点击按“来源 + 天 + 查询类型”聚合；`SOURCE_STATS_ENABLED=0` 可关闭。
+- 接口：`GET /api/stats/sources?days=30&category=study`
+  （`days=0` 表示全部时间；`category` 支持 `all/movie/study/software/music`）。
+
+### 按来源随机抽样审计
+
+巡检器优先查“新入库/疑似/过期”，直接比死链率会有选择偏差。用随机抽样做横向对比：
+
+```bash
+# 预览，不写库
+python backend/source_audit.py --sample 50
+
+# 写回 validity（建议每周跑一次）
+python backend/source_audit.py --sample 50 --apply
+
+# Docker 部署（脚本已打进后端镜像）
+docker compose exec backend python source_audit.py --sample 50 --apply
+```
+
+### 搜索质量评估
+
+固定 27 个查询（影视/学习/软件/短词/长尾）的评估集，跑 top10 相关率、
+重复卡、死链率、来源多样性：
+
+```bash
+# 基线
+python scripts/eval_search.py --no-force --out docs/eval/baseline.json
+
+# 人工标签：编辑 tools/eval_labels.json，每个 query 填 top10 的 0/1
+# 改完代码后对比
+python scripts/eval_search.py --no-force --out docs/eval/current.json \
+  --compare docs/eval/baseline.json
+
+# 只看本地索引通道（验证 archive 相关度过滤）
+python scripts/eval_search.py --mode archive --no-force --out docs/eval/archive.json
+```
+
+评测请求默认 `skip_stats=true`，不会污染来源曝光/CTR。详细指标与标签说明见
+[docs/eval/README.md](docs/eval/README.md)。
+
+---
+
 ## ⚙️ 环境变量
 
 | 变量 | 默认值 | 说明 |
@@ -202,6 +251,11 @@ HOST=0.0.0.0 python app.py
 | `VALIDITY_DEAD_TTL_HOURS` | 12 | 失效复查间隔（探测分享恢复） |
 | `CHECKER_INTERVAL_HOURS` | 1 | 后台巡检周期（小时） |
 | `CHECKER_CYCLE_LIMIT` | 300 | 每轮巡检最多检测条数 |
+| `SOURCE_STATS_ENABLED` | 1 | 来源曝光/点击统计开关 |
+| `SOURCE_STATS_CACHE_SECONDS` | 60 | 来源质量表聚合缓存秒数 |
+| `SOURCE_LOW_SAMPLE_THRESHOLD` | 20 | 已检测数低于该值的来源标“样本不足” |
+| `SOURCE_QUALITY_RANKING` | 1 | 来源质量降权开关（仅对样本足够+高死链+低独家的来源） |
+| `SOURCE_DIVERSITY_CAP` | 8 | 首页单来源最多卡片数；0 关闭多样性限制 |
 
 ### 🔒 访客直链解析的访问控制
 
